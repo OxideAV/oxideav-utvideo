@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-utvideo/compare/v0.0.1...v0.0.2) - 2026-05-04
+
+### Other
+
+- accept Pro UQ + Pack UM FourCCs (extradata path now reachable)
+- add GRADIENT and MEDIAN forward+inverse round-trip tests
+- rustfmt fixup for ULRA assert_eq line length
+- add ULRA + ULY0 + ULY4 ffmpeg interop fixtures (15 total)
+- replace never-match regex with semver_check = false
+
 ### Added
 
 - Bit-exact ffmpeg interop fixtures for `ULRA` (gbrap, alpha plane),
