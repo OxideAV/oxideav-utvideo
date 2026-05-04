@@ -238,6 +238,129 @@ mod tests {
         );
     }
 
+    /// Forward GRADIENT predictor matching the inverse rules in
+    /// [`apply_gradient`]: row 0 of the slice uses single-row LEFT
+    /// (seed `0x80`); column 0 of subsequent rows uses TOP; otherwise
+    /// `residual = pixel - (A + B - C) mod 256`.
+    fn forward_gradient(plane: &[u8], width: usize, height: usize) -> Vec<u8> {
+        let mut out = vec![0u8; plane.len()];
+        // Row 0: forward LEFT seeded at 0x80.
+        let mut prev = SEED_8BIT;
+        for x in 0..width {
+            out[x] = plane[x].wrapping_sub(prev);
+            prev = plane[x];
+        }
+        // Subsequent rows.
+        for y in 1..height {
+            // Column 0: forward TOP.
+            let i = y * width;
+            out[i] = plane[i].wrapping_sub(plane[i - width]);
+            for x in 1..width {
+                let i = y * width + x;
+                let a = plane[i - 1];
+                let b = plane[i - width];
+                let c = plane[i - width - 1];
+                let pred = a.wrapping_add(b).wrapping_sub(c);
+                out[i] = plane[i].wrapping_sub(pred);
+            }
+        }
+        out
+    }
+
+    /// Forward MEDIAN matching [`apply_median`]: row 0 uses LEFT;
+    /// row 1 column 0 uses TOP; row 1 column ≥ 1 and rows ≥ 2 use
+    /// `mid_pred(A, B, (A + B - C) mod 256)`.
+    fn forward_median(plane: &[u8], width: usize, height: usize) -> Vec<u8> {
+        let mut out = vec![0u8; plane.len()];
+        // Row 0: forward LEFT seeded at 0x80.
+        let mut prev = SEED_8BIT;
+        for x in 0..width {
+            out[x] = plane[x].wrapping_sub(prev);
+            prev = plane[x];
+        }
+        if height < 2 {
+            return out;
+        }
+        // The inverse path treats the slice as a flattened linear scan
+        // for the `a` (left) and `c` (above-left) wrap-arounds — see
+        // `apply_median`. Mirror that exactly for the forward path.
+        for y in 1..height {
+            for x in 0..width {
+                let i = y * width + x;
+                let a = plane[i - 1];
+                let b = plane[i - width];
+                let c = if x == 0 && y == 1 {
+                    a
+                } else {
+                    plane[i - width - 1]
+                };
+                let pred = mid_pred(a, b, c);
+                out[i] = plane[i].wrapping_sub(pred);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn gradient_round_trip_handcrafted() {
+        // 6×4 plane chosen to exercise both row-0 LEFT and the
+        // gradient-rule pixels in subsequent rows, plus a column-0
+        // wrap into the previous row.
+        let w = 6;
+        let h = 4;
+        let plane: Vec<u8> = (0..(w * h)).map(|i| (i as u8).wrapping_mul(7)).collect();
+        let residuals = forward_gradient(&plane, w, h);
+        let mut out = residuals.clone();
+        apply_inverse_8bit(Predictor::Gradient, &mut out, w, h);
+        assert_eq!(out, plane, "gradient inverse must undo its forward");
+    }
+
+    #[test]
+    fn gradient_row0_uses_left_seed() {
+        // Row 0, single row, residuals [10, 20] should decode to
+        // [0x80+10, 0x80+30] (cumulative LEFT seeded at 0x80).
+        let mut p = vec![10u8, 20];
+        apply_inverse_8bit(Predictor::Gradient, &mut p, 2, 1);
+        assert_eq!(p, vec![0x80 + 10, 0x80 + 30]);
+    }
+
+    #[test]
+    fn gradient_col0_row1_uses_top() {
+        // 2×2, residuals laid out row-major:
+        //   row 0: [0, 0]              → after row-0 LEFT (seed 0x80) → [0x80, 0x80]
+        //   row 1: [0x10, 0]           → col 0 uses TOP → 0x80 + 0x10 = 0x90
+        //                                col 1 uses A+B-C = 0x90 + 0x80 - 0x80 = 0x90
+        //                                pixel = 0 + 0x90 = 0x90
+        let mut p = vec![0u8, 0, 0x10, 0];
+        apply_inverse_8bit(Predictor::Gradient, &mut p, 2, 2);
+        assert_eq!(p, vec![0x80, 0x80, 0x90, 0x90]);
+    }
+
+    #[test]
+    fn median_round_trip_handcrafted() {
+        // 5×4 plane mixing high and low values to make the 3-way
+        // median step nontrivial and exercise the modular wrap.
+        let w = 5;
+        let h = 4;
+        let plane: Vec<u8> = (0..(w * h))
+            .map(|i| (i as u8).wrapping_mul(13).wrapping_add(0x42))
+            .collect();
+        let residuals = forward_median(&plane, w, h);
+        let mut out = residuals.clone();
+        apply_inverse_8bit(Predictor::Median, &mut out, w, h);
+        assert_eq!(out, plane, "median inverse must undo its forward");
+    }
+
+    #[test]
+    fn median_diverges_from_jpeg_ls_on_overflow() {
+        // Trace doc §8.1 divergence example: A=100, B=200, C=10.
+        // A + B − C = 290 wraps to 34 (mod 256); 3-way median of
+        // (100, 200, 34) is 100. Ut Video predicts 100; JPEG-LS
+        // would predict 200. We verify that our `mid_pred` matches
+        // the Ut Video answer.
+        assert_eq!(mid_pred(100, 200, 10), 100);
+    }
+
     #[test]
     fn rgb_g_centred_round_trip() {
         // Encode side: B' = B - G - 0x80, R' = R - G - 0x80.

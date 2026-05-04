@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plane code path, the 4:2:0 chroma row-partition, and the 4:4:4
   no-subsample plane handling.
 
+- Per-pixel unit coverage for the GRADIENT and MEDIAN inverse
+  predictors: hand-crafted forward → inverse round-trip tests over
+  6×4 / 5×4 plane fragments (covering row-0 LEFT seed, column-0 TOP
+  step, gradient interior, MEDIAN row-1-col-0 collapse), plus the
+  trace doc §8.1 divergence example asserting Ut Video's MEDIAN
+  diverges from JPEG-LS clip-MED on `A+B-C` overflow neighbourhoods.
+  Closes the GRADIENT validation gap left by the missing ffmpeg
+  encoder support.
+
 ### Changed
 
 - README: corrected the interop coverage line. FFmpeg's `utvideo`
