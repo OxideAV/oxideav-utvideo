@@ -33,8 +33,8 @@ oxideav-utvideo = "0.0"
 
 | Item                  | Notes                                                                |
 |-----------------------|----------------------------------------------------------------------|
-| Pro UQ family         | `UQRG`, `UQRA`, `UQY0`, `UQY2` — 10-bit, header order swapped (trace report §6) |
-| Pack UM (SymPack)     | `UMRG`, `UMRA`, `UMY2/4`, `UMH2/4` — two-stream block-of-8 raw-bits coder (trace report §7) |
+| Pro UQ family         | `UQRG`, `UQRA`, `UQY0`, `UQY2` — 10-bit, header order swapped (trace report §6). Extradata + plane shape now parsed; decode rejected with explicit "trace doc §6" message. |
+| Pack UM (SymPack)     | `UMRG`, `UMRA`, `UMY2/4`, `UMH2/4` — two-stream block-of-8 raw-bits coder (trace report §7). Extradata + plane shape now parsed; decode rejected with explicit "trace doc §7" message. |
 | Interlaced re-pairing | flag is parsed; the per-frame line re-pair is not yet wired          |
 | YUV→RGB / colour conv | callers receive planar Y/U/V or G/B/R\[A\] and convert themselves    |
 

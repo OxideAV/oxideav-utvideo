@@ -30,8 +30,13 @@
 //!
 //! ## What's not yet wired
 //!
-//! - Pro UQ (10-bit) — extradata accepted, decoder not yet implemented.
-//! - Pack UM (SymPack) — header detected, decoder not yet implemented.
+//! - Pro UQ (10-bit) — `PlaneShape` + 8-byte extradata accepted;
+//!   per-frame layout walker (trace doc §6) not yet implemented.
+//!   `UtVideoDecoder::new` rejects with an explicit message.
+//! - Pack UM (SymPack) — `PlaneShape` + 16-byte extradata accepted;
+//!   the two-stream block-of-8 raw-bits coder (trace doc §7 / §12.5)
+//!   is not yet implemented. `UtVideoDecoder::new` rejects with an
+//!   explicit message.
 //! - Interlaced re-pairing — flag parsed, not yet applied.
 //! - Container/registry hookup — the [`register`] entry point is in
 //!   place but the [`make_decoder`] path is exercised primarily via

@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plane code path, the 4:2:0 chroma row-partition, and the 4:4:4
   no-subsample plane handling.
 
+- Pro UQ (10-bit) and Pack UM (SymPack) FourCC catalogue + extradata
+  parsing now reachable. `PlaneShape::from_fourcc` returns a
+  `Family::Pro` / `Family::Pack` shape (with `bit_depth = 10` for UQ,
+  YUV-side `Yuv4xxP10Le` PixelFormats; UQRG/UQRA placeholder map to
+  `Rgb48Le` / `Rgba64Le` until a `Gbrp10*` variant lands in
+  oxideav-core), `ExtraData::parse` now exercises the previously
+  unreachable `parse_pro` and `parse_pack` branches, and
+  `UtVideoDecoder::new` rejects each non-classic family with an
+  explicit "decode not yet implemented; see trace doc §6 / §7" error
+  rather than the prior generic "only classic UL is wired" message.
+  Unit-tested across all six pro tags (`UQRG/UQRA/UQY0/UQY2`) and
+  pack tags (`UMRG/UMRA/UMY2/UMY4` plus their `UMH*` BT.709 twins),
+  including a regression assertion that no `UMY0` / `UMH0` exists per
+  trace doc §7 / §12.1.
 - Per-pixel unit coverage for the GRADIENT and MEDIAN inverse
   predictors: hand-crafted forward → inverse round-trip tests over
   6×4 / 5×4 plane fragments (covering row-0 LEFT seed, column-0 TOP

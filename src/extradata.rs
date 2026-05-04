@@ -193,4 +193,53 @@ mod tests {
     fn rejects_short_classic_extradata() {
         assert!(ExtraData::parse(FourCc(*b"ULRG"), &[0; 8]).is_err());
     }
+
+    #[test]
+    fn parses_pro_extradata_8_bytes() {
+        // Trace doc §3.2.4: pro family carries only version +
+        // original_format. Slice count and predictor live in the
+        // per-frame header.
+        let raw = [
+            0x01, 0x01, 0x02, 0x12, // version (LE32)
+            0x59, 0x55, 0x59, 0x32, // original_format BE32 == "YUY2"
+        ];
+        let xd = ExtraData::parse(FourCc(*b"UQY2"), &raw).unwrap();
+        assert_eq!(xd.family, Family::Pro);
+        assert_eq!(xd.shape.bit_depth, 10);
+        assert_eq!(xd.frame_info_size, 0);
+        // Pro family does not advertise slices in extradata (== 0
+        // sentinel; per-frame header carries the real value).
+        assert_eq!(xd.flags.slices, 0);
+        assert!(!xd.flags.interlaced);
+    }
+
+    #[test]
+    fn rejects_short_pro_extradata() {
+        // Pro family needs 8 bytes minimum.
+        assert!(ExtraData::parse(FourCc(*b"UQRG"), &[0; 4]).is_err());
+    }
+
+    #[test]
+    fn parses_pack_extradata_with_compression_2() {
+        // Trace doc §7: pack extradata is 16 bytes with compression
+        // = 2 at offset 8 and slices_minus_one at offset 9.
+        let raw = [
+            0x01, 0x01, 0x02, 0x12, // version
+            0x59, 0x55, 0x59, 0x32, // original_format BE32
+            0x02, // compression == COMP_PACK (2)
+            0x03, // slices_minus_one == 3 → slices = 4
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let xd = ExtraData::parse(FourCc(*b"UMY2"), &raw).unwrap();
+        assert_eq!(xd.family, Family::Pack);
+        assert_eq!(xd.flags.slices, 4);
+    }
+
+    #[test]
+    fn rejects_pack_extradata_with_wrong_compression() {
+        // compression != 2 must fail.
+        let mut raw = [0u8; 16];
+        raw[8] = 1;
+        assert!(ExtraData::parse(FourCc(*b"UMRG"), &raw).is_err());
+    }
 }

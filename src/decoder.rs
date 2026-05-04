@@ -48,10 +48,22 @@ impl UtVideoDecoder {
         height: u32,
     ) -> Result<UtVideoDecoder> {
         let shape = extradata.shape;
-        if shape.family != Family::Classic {
-            return Err(Error::unsupported(
-                "Ut Video: only the classic UL family is wired today",
-            ));
+        match shape.family {
+            Family::Classic => {}
+            Family::Pro => {
+                return Err(Error::unsupported(format!(
+                    "Ut Video pro family ({}) decode not yet implemented \
+                     (extradata accepted; see trace doc §6 for the per-frame layout)",
+                    fourcc.as_str()
+                )));
+            }
+            Family::Pack => {
+                return Err(Error::unsupported(format!(
+                    "Ut Video pack/SymPack family ({}) decode not yet implemented \
+                     (extradata accepted; see trace doc §7 / §12.5 for the bit code)",
+                    fourcc.as_str()
+                )));
+            }
         }
         Ok(UtVideoDecoder {
             fourcc,
@@ -264,6 +276,41 @@ mod tests {
         // Trace report §4.5: 240 / 4 = [0, 60, 120, 180, 240].
         let p = compute_row_partition(240, 4);
         assert_eq!(p, vec![0, 60, 120, 180, 240]);
+    }
+
+    #[test]
+    fn pro_decode_rejected_with_clear_message() {
+        // 8-byte pro extradata is accepted by ExtraData::parse, but
+        // UtVideoDecoder::new still refuses with an explicit
+        // "decode not yet implemented" message until the per-frame
+        // layout walker for trace doc §6 is wired.
+        let xd_raw = [0u8; 8];
+        let xd = ExtraData::parse(FourCc(*b"UQY2"), &xd_raw).unwrap();
+        let err = match UtVideoDecoder::new(FourCc(*b"UQY2"), xd, 64, 48) {
+            Ok(_) => panic!("expected pro-family decode-NYI rejection, got Ok"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("pro family") && msg.contains("not yet implemented"),
+            "expected pro-family decode-NYI rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn pack_decode_rejected_with_clear_message() {
+        let mut xd_raw = [0u8; 16];
+        xd_raw[8] = 2; // compression == COMP_PACK
+        let xd = ExtraData::parse(FourCc(*b"UMY4"), &xd_raw).unwrap();
+        let err = match UtVideoDecoder::new(FourCc(*b"UMY4"), xd, 64, 48) {
+            Ok(_) => panic!("expected pack-family decode-NYI rejection, got Ok"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("pack/SymPack family") && msg.contains("not yet implemented"),
+            "expected pack-family decode-NYI rejection, got: {msg}"
+        );
     }
 
     #[test]
