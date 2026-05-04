@@ -176,11 +176,7 @@ fn run_ulra(stem: &str) {
     let frame = decode_packet(FourCc(*b"ULRA"), &parsed.extradata, W, H, &parsed.packet)
         .expect("decode ULRA packet");
 
-    assert_eq!(
-        frame.planes.len(),
-        4,
-        "ULRA produces 4 planes (G, B, R, A)"
-    );
+    assert_eq!(frame.planes.len(), 4, "ULRA produces 4 planes (G, B, R, A)");
     let pw = W as usize;
     let ph = H as usize;
     for p in &frame.planes {
