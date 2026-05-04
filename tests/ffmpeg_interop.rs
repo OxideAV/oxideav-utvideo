@@ -56,6 +56,51 @@ fn uly2_median_matches_ffmpeg_raw() {
     run_uly2("utv_64x48_uly2_median");
 }
 
+#[test]
+fn ulra_none_matches_ffmpeg_raw() {
+    run_ulra("utv_64x48_ulra_none");
+}
+
+#[test]
+fn ulra_left_matches_ffmpeg_raw() {
+    run_ulra("utv_64x48_ulra_left");
+}
+
+#[test]
+fn ulra_median_matches_ffmpeg_raw() {
+    run_ulra("utv_64x48_ulra_median");
+}
+
+#[test]
+fn uly0_none_matches_ffmpeg_raw() {
+    run_uly0("utv_64x48_uly0_none");
+}
+
+#[test]
+fn uly0_left_matches_ffmpeg_raw() {
+    run_uly0("utv_64x48_uly0_left");
+}
+
+#[test]
+fn uly0_median_matches_ffmpeg_raw() {
+    run_uly0("utv_64x48_uly0_median");
+}
+
+#[test]
+fn uly4_none_matches_ffmpeg_raw() {
+    run_uly4("utv_64x48_uly4_none");
+}
+
+#[test]
+fn uly4_left_matches_ffmpeg_raw() {
+    run_uly4("utv_64x48_uly4_left");
+}
+
+#[test]
+fn uly4_median_matches_ffmpeg_raw() {
+    run_uly4("utv_64x48_uly4_median");
+}
+
 fn run_ulrg(stem: &str) {
     let avi_path = fixtures_dir().join(format!("{stem}.avi"));
     let raw_path = fixtures_dir().join(format!("{stem}.gbrp"));
@@ -119,6 +164,103 @@ fn run_uly2(stem: &str) {
         W as usize / 2,
         H as usize,
     );
+}
+
+fn run_ulra(stem: &str) {
+    let avi_path = fixtures_dir().join(format!("{stem}.avi"));
+    let raw_path = fixtures_dir().join(format!("{stem}.gbrap"));
+    let avi = fs::read(&avi_path).expect("read avi fixture");
+    let raw = fs::read(&raw_path).expect("read gbrap dump");
+
+    let parsed = parse_avi(&avi);
+    let frame = decode_packet(FourCc(*b"ULRA"), &parsed.extradata, W, H, &parsed.packet)
+        .expect("decode ULRA packet");
+
+    assert_eq!(
+        frame.planes.len(),
+        4,
+        "ULRA produces 4 planes (G, B, R, A)"
+    );
+    let pw = W as usize;
+    let ph = H as usize;
+    for p in &frame.planes {
+        assert_eq!(p.len(), pw * ph);
+    }
+
+    // ffmpeg's `gbrap` raw layout is G, B, R, A — each a packed
+    // full-resolution byte plane.
+    let expected_g = &raw[0..pw * ph];
+    let expected_b = &raw[pw * ph..2 * pw * ph];
+    let expected_r = &raw[2 * pw * ph..3 * pw * ph];
+    let expected_a = &raw[3 * pw * ph..4 * pw * ph];
+    assert_planes_eq("G", &frame.planes[0], expected_g, pw, ph);
+    assert_planes_eq("B", &frame.planes[1], expected_b, pw, ph);
+    assert_planes_eq("R", &frame.planes[2], expected_r, pw, ph);
+    assert_planes_eq("A", &frame.planes[3], expected_a, pw, ph);
+}
+
+fn run_uly0(stem: &str) {
+    let avi_path = fixtures_dir().join(format!("{stem}.avi"));
+    let raw_path = fixtures_dir().join(format!("{stem}.yuv420p"));
+    let avi = fs::read(&avi_path).expect("read avi fixture");
+    let raw = fs::read(&raw_path).expect("read yuv420p dump");
+
+    let parsed = parse_avi(&avi);
+    let frame = decode_packet(FourCc(*b"ULY0"), &parsed.extradata, W, H, &parsed.packet)
+        .expect("decode ULY0 packet");
+
+    assert_eq!(frame.planes.len(), 3, "ULY0 produces 3 planes (Y, U, V)");
+    let yp = (W as usize) * (H as usize);
+    // 4:2:0 — half-width, half-height chroma.
+    let cp = (W as usize / 2) * (H as usize / 2);
+    assert_eq!(frame.planes[0].len(), yp);
+    assert_eq!(frame.planes[1].len(), cp);
+    assert_eq!(frame.planes[2].len(), cp);
+
+    // ffmpeg's `yuv420p` raw layout: Y, then U, then V.
+    let expected_y = &raw[0..yp];
+    let expected_u = &raw[yp..yp + cp];
+    let expected_v = &raw[yp + cp..yp + 2 * cp];
+    assert_planes_eq("Y", &frame.planes[0], expected_y, W as usize, H as usize);
+    assert_planes_eq(
+        "U",
+        &frame.planes[1],
+        expected_u,
+        W as usize / 2,
+        H as usize / 2,
+    );
+    assert_planes_eq(
+        "V",
+        &frame.planes[2],
+        expected_v,
+        W as usize / 2,
+        H as usize / 2,
+    );
+}
+
+fn run_uly4(stem: &str) {
+    let avi_path = fixtures_dir().join(format!("{stem}.avi"));
+    let raw_path = fixtures_dir().join(format!("{stem}.yuv444p"));
+    let avi = fs::read(&avi_path).expect("read avi fixture");
+    let raw = fs::read(&raw_path).expect("read yuv444p dump");
+
+    let parsed = parse_avi(&avi);
+    let frame = decode_packet(FourCc(*b"ULY4"), &parsed.extradata, W, H, &parsed.packet)
+        .expect("decode ULY4 packet");
+
+    assert_eq!(frame.planes.len(), 3, "ULY4 produces 3 planes (Y, U, V)");
+    let yp = (W as usize) * (H as usize);
+    // 4:4:4 — chroma planes are full resolution.
+    assert_eq!(frame.planes[0].len(), yp);
+    assert_eq!(frame.planes[1].len(), yp);
+    assert_eq!(frame.planes[2].len(), yp);
+
+    let expected_y = &raw[0..yp];
+    let expected_u = &raw[yp..2 * yp];
+    let expected_v = &raw[2 * yp..3 * yp];
+    assert_planes_eq("Y", &frame.planes[0], expected_y, W as usize, H as usize);
+    assert_planes_eq("U", &frame.planes[1], expected_u, W as usize, H as usize);
+    assert_planes_eq("V", &frame.planes[2], expected_v, W as usize, H as usize);
 }
 
 fn assert_planes_eq(name: &str, got: &[u8], want: &[u8], width: usize, height: usize) {

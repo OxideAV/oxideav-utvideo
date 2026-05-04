@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Bit-exact ffmpeg interop fixtures for `ULRA` (gbrap, alpha plane),
+  `ULY0` (yuv420p, half-half subsampled chroma), and `ULY4` (yuv444p,
+  full-resolution chroma) with predictors NONE/LEFT/MEDIAN — 9 new
+  64×48 single-frame AVIs (15 fixtures total). Exercises the alpha
+  plane code path, the 4:2:0 chroma row-partition, and the 4:4:4
+  no-subsample plane handling.
+
+### Changed
+
+- README: corrected the interop coverage line. FFmpeg's `utvideo`
+  encoder rejects `-pred gradient` with `AVERROR_PATCHWELCOME`, so the
+  GRADIENT inverse-predictor — though implemented and trace-doc
+  verified per spec §8 — has no third-party reference encoding to
+  validate against. Bit-exact interop is now stated as
+  ULRG/ULRA/ULY0/ULY2/ULY4 × NONE/LEFT/MEDIAN.
+
 ## [0.0.1] - 2026-05-02
 
 ### Added

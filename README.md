@@ -27,7 +27,7 @@ oxideav-utvideo = "0.0"
 | Single-symbol fast path           | yes (`length == 0` short-circuit)                              |
 | RGB G-centred inverse transform   | yes (ULRG / ULRA)                                              |
 | Multi-slice packets               | yes                                                            |
-| Interop (FFmpeg → us)             | bit-exact for ULRG and ULY2 with predictors NONE/LEFT/GRADIENT/MEDIAN |
+| Interop (FFmpeg → us)             | bit-exact for ULRG, ULRA, ULY0, ULY2, ULY4 with predictors NONE/LEFT/MEDIAN (15 fixtures); GRADIENT not exercised — FFmpeg's encoder rejects it (`AVERROR_PATCHWELCOME`) so no third-party reference exists |
 
 ## Not yet implemented
 

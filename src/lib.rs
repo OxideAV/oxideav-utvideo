@@ -23,8 +23,10 @@
 //! - `length == 0` single-symbol fast path (encoder's fill optimisation).
 //! - G-centred RGB inverse colour transform for `ULRG` / `ULRA`.
 //!
-//! Verified against `ffmpeg -c:v utvideo` output: ULRG (gbrp) and
-//! ULY2 (yuv422p) decode bit-exactly.
+//! Verified against `ffmpeg -c:v utvideo` output: `ULRG` (gbrp),
+//! `ULRA` (gbrap), `ULY0` (yuv420p), `ULY2` (yuv422p), and `ULY4`
+//! (yuv444p) decode bit-exactly across the predictors FFmpeg can
+//! emit (NONE, LEFT, MEDIAN — FFmpeg rejects `-pred gradient`).
 //!
 //! ## What's not yet wired
 //!
