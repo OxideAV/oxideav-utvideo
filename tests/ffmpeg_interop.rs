@@ -259,6 +259,49 @@ fn run_uly4(stem: &str) {
     assert_planes_eq("V", &frame.planes[2], expected_v, W as usize, H as usize);
 }
 
+// ---------------------------------------------------------------------------
+// Interlaced ULRG fixtures from FFmpeg FATE (Ut Video Codec Suite 18.2.1.1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ulrg_interlaced_gradient_matches_ffmpeg_raw() {
+    // FATE sample: utvideo_rgb_64x48_int_gradient.avi
+    // Official Ut Video Codec Suite 18.2.1.1, ULRG, gradient, interlaced.
+    run_ulrg_interlaced("utvideo_rgb_64x48_int_gradient");
+}
+
+#[test]
+fn ulrg_interlaced_median_matches_ffmpeg_raw() {
+    // FATE sample: utvideo_rgb_64x48_int_median.avi
+    // Official Ut Video Codec Suite 18.2.1.1, ULRG, median, interlaced.
+    run_ulrg_interlaced("utvideo_rgb_64x48_int_median");
+}
+
+fn run_ulrg_interlaced(stem: &str) {
+    let avi_path = fixtures_dir().join(format!("{stem}.avi"));
+    let raw_path = fixtures_dir().join(format!("{stem}.gbrp"));
+    let avi = fs::read(&avi_path).expect("read avi fixture");
+    let raw = fs::read(&raw_path).expect("read gbrp dump (from ffmpeg decode)");
+
+    let parsed = parse_avi(&avi);
+    let frame = decode_packet(FourCc(*b"ULRG"), &parsed.extradata, W, H, &parsed.packet)
+        .expect("decode interlaced ULRG packet");
+
+    assert_eq!(frame.planes.len(), 3, "ULRG produces 3 planes (G, B, R)");
+    let pw = W as usize;
+    let ph = H as usize;
+    assert_eq!(frame.planes[0].len(), pw * ph);
+    assert_eq!(frame.planes[1].len(), pw * ph);
+    assert_eq!(frame.planes[2].len(), pw * ph);
+
+    let expected_g = &raw[0..pw * ph];
+    let expected_b = &raw[pw * ph..2 * pw * ph];
+    let expected_r = &raw[2 * pw * ph..3 * pw * ph];
+    assert_planes_eq("G", &frame.planes[0], expected_g, pw, ph);
+    assert_planes_eq("B", &frame.planes[1], expected_b, pw, ph);
+    assert_planes_eq("R", &frame.planes[2], expected_r, pw, ph);
+}
+
 fn assert_planes_eq(name: &str, got: &[u8], want: &[u8], width: usize, height: usize) {
     if got == want {
         return;

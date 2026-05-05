@@ -288,6 +288,159 @@ pub fn byteswap_dwords(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A built canonical-Huffman decoder for a 10-bit (1024-symbol) plane.
+/// Same orientation as `HuffTable` (all-ones shortest), over the 10-bit
+/// alphabet 0..=1023.
+#[derive(Debug, Clone)]
+pub enum HuffTable10 {
+    /// Length-0 entry detected — emit `symbol` for every output sample.
+    Fill { symbol: u16 },
+    /// Real Huffman tree over the 10-bit alphabet.
+    Tree(Box<HuffTree10>),
+}
+
+/// Heap payload for the 10-bit real-Huffman variant.
+#[derive(Debug, Clone)]
+pub struct HuffTree10 {
+    /// Leaves sorted by `(length asc, msb_aligned asc)`.
+    pub leaves: Vec<Code10>,
+    pub max_length: u8,
+}
+
+/// One leaf in the 10-bit canonical-Huffman table.
+#[derive(Debug, Clone, Copy)]
+pub struct Code10 {
+    pub msb_aligned: u32,
+    pub length: u8,
+    pub symbol: u16,
+}
+
+impl HuffTable10 {
+    /// Build from a 1024-byte length array (one byte per 10-bit symbol).
+    pub fn from_lengths_1024(lens: &[u8]) -> Result<HuffTable10> {
+        debug_assert_eq!(lens.len(), 1024);
+        // Single-symbol fill path.
+        for (sym, &len) in lens.iter().enumerate() {
+            if len == 0 {
+                return Ok(HuffTable10::Fill {
+                    symbol: sym as u16,
+                });
+            }
+        }
+        let mut entries: Vec<(u16, u8)> = Vec::with_capacity(128);
+        for (sym, &len) in lens.iter().enumerate() {
+            if len == 0xFF {
+                continue;
+            }
+            if len > 32 {
+                return Err(Error::invalid(format!(
+                    "Ut Video 10-bit Huffman: length {len} > 32 for symbol {sym}"
+                )));
+            }
+            entries.push((sym as u16, len));
+        }
+        if entries.is_empty() {
+            return Err(Error::invalid(
+                "Ut Video 10-bit Huffman: no codes (every length is 0xFF)",
+            ));
+        }
+        entries.sort_by_key(|&(sym, len)| (len, sym));
+        let max_length = entries.last().unwrap().1;
+
+        let mut leaves: Vec<Code10> = Vec::with_capacity(entries.len());
+        let mut code: u64 = (1u64 << max_length) - 1;
+        for (sym, len) in entries {
+            let codeword = code >> (max_length - len);
+            let msb_aligned = (codeword << (max_length - len)) as u32;
+            leaves.push(Code10 {
+                msb_aligned,
+                length: len,
+                symbol: sym,
+            });
+            let step = 1u64 << (max_length - len);
+            code = code.wrapping_sub(step);
+        }
+        leaves.sort_by_key(|c| (c.length, c.msb_aligned));
+        Ok(HuffTable10::Tree(Box::new(HuffTree10 {
+            leaves,
+            max_length,
+        })))
+    }
+
+    /// Decode the next 10-bit symbol from `reader`. For `Fill` the
+    /// bitstream is not consumed.
+    pub fn decode_symbol(&self, reader: &mut BitReader<'_>) -> Result<u16> {
+        match self {
+            HuffTable10::Fill { symbol } => Ok(*symbol),
+            HuffTable10::Tree(tree) => {
+                let leaves = &tree.leaves;
+                let max = tree.max_length as u32;
+                let peeked = reader.peek_bits(max)?;
+                for leaf in leaves {
+                    let mask = if leaf.length == 32 {
+                        0xFFFF_FFFF
+                    } else {
+                        ((1u32 << leaf.length) - 1) << (max as u8 - leaf.length)
+                    };
+                    if (peeked & mask) == leaf.msb_aligned {
+                        reader.consume(leaf.length as u32)?;
+                        return Ok(leaf.symbol);
+                    }
+                }
+                Err(Error::invalid(
+                    "Ut Video 10-bit Huffman: no matching codeword (corrupt slice?)",
+                ))
+            }
+        }
+    }
+}
+
+/// LE bit reader for the SymPack family (trace doc §7 / §12.5).
+///
+/// Unlike the classic/pro family which byte-swaps by 4 and reads MSB-first,
+/// SymPack uses `init_get_bits8_le` — natural byte order, LE bit packing.
+/// Bits are consumed LSB-first from each byte.
+pub struct LeBitReader<'a> {
+    buf: &'a [u8],
+    byte_pos: usize,
+    cache: u64,
+    bits_in_cache: u32,
+}
+
+impl<'a> LeBitReader<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        LeBitReader {
+            buf,
+            byte_pos: 0,
+            cache: 0,
+            bits_in_cache: 0,
+        }
+    }
+
+    /// Read `n` bits (1..=32) LSB-first. Result is right-aligned.
+    pub fn read_bits(&mut self, n: u32) -> Result<u32> {
+        debug_assert!(n <= 32);
+        self.refill(n)?;
+        let val = (self.cache & ((1u64 << n) - 1)) as u32;
+        self.cache >>= n;
+        self.bits_in_cache = self.bits_in_cache.saturating_sub(n);
+        Ok(val)
+    }
+
+    fn refill(&mut self, want: u32) -> Result<()> {
+        while self.bits_in_cache < want {
+            if self.byte_pos >= self.buf.len() {
+                return Ok(()); // zero-pad the tail
+            }
+            let byte = self.buf[self.byte_pos] as u64;
+            self.byte_pos += 1;
+            self.cache |= byte << self.bits_in_cache;
+            self.bits_in_cache += 8;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

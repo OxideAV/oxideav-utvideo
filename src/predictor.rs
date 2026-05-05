@@ -42,8 +42,8 @@ impl Predictor {
 const SEED_8BIT: u8 = 0x80;
 
 /// Apply the inverse predictor in-place to a single slice of one
-/// plane. `plane` is laid out as `width × slice_height` row-major;
-/// `width` is the plane width (already chroma-subsampled by the
+/// plane (progressive mode). `plane` is laid out as `width × slice_height`
+/// row-major; `width` is the plane width (already chroma-subsampled by the
 /// caller). For NONE this is a no-op.
 pub fn apply_inverse_8bit(pred: Predictor, plane: &mut [u8], width: usize, slice_height: usize) {
     if width == 0 || slice_height == 0 {
@@ -55,6 +55,122 @@ pub fn apply_inverse_8bit(pred: Predictor, plane: &mut [u8], width: usize, slice
         Predictor::Left => apply_left(plane, width, slice_height),
         Predictor::Gradient => apply_gradient(plane, width, slice_height),
         Predictor::Median => apply_median(plane, width, slice_height),
+    }
+}
+
+/// Apply the inverse predictor for interlaced mode.
+///
+/// In interlaced mode the encoded data is in **display order** — rows
+/// alternate between top (even) and bottom (odd) fields.  LEFT carries
+/// across all rows in a single linear scan (unchanged from progressive).
+/// GRADIENT and MEDIAN use a **stride-2** neighbourhood: each pixel's
+/// "above" neighbour is 2 rows back (same field), not 1 row back.
+///
+/// Concretely for a slice whose first row is `first_row_in_frame`:
+/// * row 0 of the slice (first row of each field that starts in this slice):
+///   both field-0 (`first_row_in_frame` is even) and field-1 (odd) use LEFT.
+/// * For GRADIENT/MEDIAN, rows with `row_in_slice >= 2` use the `above =
+///   plane[row-2, x]` neighbour.  Rows 0 and 1 of a slice both use LEFT.
+pub fn apply_inverse_8bit_interlaced(
+    pred: Predictor,
+    plane: &mut [u8],
+    width: usize,
+    slice_height: usize,
+    _first_row_in_frame: usize,
+) {
+    if width == 0 || slice_height == 0 {
+        return;
+    }
+    debug_assert_eq!(plane.len(), width * slice_height);
+    match pred {
+        Predictor::None => {}
+        // LEFT is the same linear scan in both progressive and interlaced modes:
+        // the single cumulative-sum runs over the flattened slice in raster order.
+        Predictor::Left => apply_left(plane, width, slice_height),
+        Predictor::Gradient => apply_gradient_interlaced(plane, width, slice_height),
+        Predictor::Median => apply_median_interlaced(plane, width, slice_height),
+    }
+}
+
+fn apply_gradient_interlaced(plane: &mut [u8], width: usize, slice_height: usize) {
+    // Rows 0 and 1 of the slice share a single linear LEFT scan (carry
+    // across the row 0→row 1 boundary; no seed reset at row 1). This is
+    // the same as apply_left() but limited to the first two rows.
+    let first_rows_end = slice_height.min(2) * width;
+    {
+        let mut prev = SEED_8BIT;
+        for px in &mut plane[0..first_rows_end] {
+            let sum = prev.wrapping_add(*px);
+            *px = sum;
+            prev = sum;
+        }
+    }
+    // Rows >= 2 use stride-2 GRADIENT: above = row y-2, above-left = row y-2, col-1.
+    //
+    // At column 0, the above-left pixel differs by field parity (verified
+    // against ffmpeg FATE fixture utvideo_rgb_64x48_int_gradient):
+    //   - Even rows (y = 2, 4, 6, …): col 0 uses TOP predictor (b = a → pred = c).
+    //   - Odd rows  (y = 3, 5, 7, …): col 0 uses the full gradient formula with
+    //     above-left = last pixel of row y-3 (linear-scan wrap across the
+    //     row y-2 boundary within the stride-2 field ordering).
+    for y in 2..slice_height {
+        let i0 = y * width; // index of (y, 0)
+        // a = linear-scan left = last pixel of row y-1.
+        let a = plane[i0 - 1];
+        let c = plane[(y - 2) * width]; // above (row y-2, col 0)
+        let b_col0 = if y % 2 == 0 {
+            // Even field row: collapse above-left to left so pred degenerates to TOP.
+            a
+        } else {
+            // Odd field row: above-left wraps to last pixel of row y-3.
+            plane[(y - 2) * width - 1]
+        };
+        let pred0 = a.wrapping_add(c).wrapping_sub(b_col0);
+        plane[i0] = pred0.wrapping_add(plane[i0]);
+
+        for x in 1..width {
+            let i = y * width + x;
+            let a = plane[i - 1];
+            let b = plane[(y - 2) * width + x - 1];
+            let c = plane[(y - 2) * width + x];
+            let pred = a.wrapping_add(c).wrapping_sub(b);
+            plane[i] = pred.wrapping_add(plane[i]);
+        }
+    }
+}
+
+fn apply_median_interlaced(plane: &mut [u8], width: usize, slice_height: usize) {
+    // Rows 0 and 1 of the slice share a single linear LEFT scan (carry
+    // across the row 0→row 1 boundary; no seed reset at row 1).
+    let first_rows_end = slice_height.min(2) * width;
+    {
+        let mut prev = SEED_8BIT;
+        for px in &mut plane[0..first_rows_end] {
+            let sum = prev.wrapping_add(*px);
+            *px = sum;
+            prev = sum;
+        }
+    }
+    // Rows >= 2: stride-2 MEDIAN with wrap-aware mid_pred.
+    for y in 2..slice_height {
+        for x in 0..width {
+            let i = y * width + x;
+            // a = left (with wrap to end of prev row at col 0).
+            let a = plane[i - 1];
+            // b = above (row y-2, same field).
+            let b = plane[i - 2 * width];
+            // c = above-left (row y-2, col x-1); col 0 wraps to end of row y-3.
+            let c = if x == 0 {
+                // For y>=2, row y-2 exists; col 0 wrap to last pixel of row y-3.
+                // But row y-3 might not exist (y==2 → y-3 would be row -1).
+                // Use the same collapse as progressive median: c = a when undefined.
+                if y == 2 { a } else { plane[(y - 2) * width - 1] }
+            } else {
+                plane[(y - 2) * width + x - 1]
+            };
+            let predict = mid_pred(a, b, c);
+            plane[i] = predict.wrapping_add(plane[i]);
+        }
     }
 }
 
@@ -184,6 +300,43 @@ fn median3(a: u8, b: u8, c: u8) -> u8 {
     (sum - lo as u16 - hi as u16) as u8
 }
 
+/// Apply the inverse predictor in-place to a single slice of one plane for
+/// 10-bit samples stored as `u16` (little-endian, high 6 bits zero).
+/// `plane` is `width × slice_height` `u16` values row-major.
+/// Operates mod 1024; LEFT seed is `0x200`.
+pub fn apply_inverse_10bit(
+    pred: Predictor,
+    plane: &mut [u16],
+    width: usize,
+    slice_height: usize,
+) {
+    if width == 0 || slice_height == 0 {
+        return;
+    }
+    debug_assert_eq!(plane.len(), width * slice_height);
+    match pred {
+        Predictor::None => {}
+        Predictor::Left => apply_left_10bit(plane, width, slice_height),
+        // UQ only supports NONE and LEFT; GRADIENT/MEDIAN silently
+        // fall through as NONE per trace doc §6.
+        Predictor::Gradient | Predictor::Median => {}
+    }
+}
+
+const SEED_10BIT: u16 = 0x200;
+const MASK_10BIT: u16 = 0x3FF;
+
+fn apply_left_10bit(plane: &mut [u16], _width: usize, _slice_height: usize) {
+    // Same single-linear-scan semantics as 8-bit LEFT, but mod 1024 with
+    // seed 0x200. Carries across rows within a slice (trace doc §6 + §8).
+    let mut prev = SEED_10BIT;
+    for px in plane.iter_mut() {
+        let sum = prev.wrapping_add(*px) & MASK_10BIT;
+        *px = sum;
+        prev = sum;
+    }
+}
+
 /// Inverse of the G-centred RGB transform (trace report §8.1):
 ///
 /// ```text
@@ -201,6 +354,48 @@ pub fn restore_g_centred_rgb(g: &[u8], b_plane: &mut [u8], r_plane: &mut [u8]) {
         *bp = bp.wrapping_add(*gp).wrapping_sub(SEED_8BIT);
         *rp = rp.wrapping_add(*gp).wrapping_sub(SEED_8BIT);
     }
+}
+
+/// Inverse of the 10-bit G-centred RGB transform (trace doc §12.6):
+///
+/// ```text
+/// R = (R' + G - 0x200) & 0x3FF
+/// B = (B' + G - 0x200) & 0x3FF
+/// G = G  (unchanged)
+/// ```
+pub fn restore_g_centred_rgb_10bit(g: &[u16], b_plane: &mut [u16], r_plane: &mut [u16]) {
+    debug_assert_eq!(g.len(), b_plane.len());
+    debug_assert_eq!(g.len(), r_plane.len());
+    for ((gp, bp), rp) in g.iter().zip(b_plane.iter_mut()).zip(r_plane.iter_mut()) {
+        *bp = (bp.wrapping_add(*gp).wrapping_sub(SEED_10BIT)) & MASK_10BIT;
+        *rp = (rp.wrapping_add(*gp).wrapping_sub(SEED_10BIT)) & MASK_10BIT;
+    }
+}
+
+/// Re-pair interlaced rows after plane decode.
+///
+/// The encoder separates a `height`-row interlaced frame into two fields:
+/// top field in encoded rows `0..height/2`, bottom field in `height/2..height`.
+/// After decode we must interleave them back: output row `2*r` = top field
+/// row `r`; output row `2*r+1` = bottom field row `r`.
+///
+/// `plane` on entry holds `width * height` bytes in "field-sequential" order
+/// (top field first, bottom field second). On exit it is in display order
+/// (alternating rows). The operation is in-place via a temporary buffer.
+pub fn reinterleave_interlaced(plane: &mut [u8], width: usize, height: usize) {
+    let half = height / 2;
+    let mut out = vec![0u8; width * height];
+    for r in 0..half {
+        // Top field row r → output even row 2r.
+        let src = r * width;
+        let dst = 2 * r * width;
+        out[dst..dst + width].copy_from_slice(&plane[src..src + width]);
+        // Bottom field row r → output odd row 2r+1.
+        let src2 = (half + r) * width;
+        let dst2 = (2 * r + 1) * width;
+        out[dst2..dst2 + width].copy_from_slice(&plane[src2..src2 + width]);
+    }
+    plane.copy_from_slice(&out);
 }
 
 #[cfg(test)]

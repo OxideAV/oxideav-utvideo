@@ -12,35 +12,19 @@
 //!
 //! ## What this crate decodes today
 //!
-//! - Classic family extradata (16 bytes: version, original_format,
-//!   frame_info_size, flags).
-//! - Per-frame layout: K planes × `[256-byte length table |
-//!   4×N_slices LE32 cumulative end offsets | slice data ]` followed
-//!   by a 4-byte `LE32 frame_info` trailer.
-//! - Per-slice byte-swap-by-4 + MSB-first canonical-Huffman decode.
-//! - Inverse predictors NONE, LEFT, GRADIENT, MEDIAN over 8-bit
-//!   samples.
-//! - `length == 0` single-symbol fast path (encoder's fill optimisation).
-//! - G-centred RGB inverse colour transform for `ULRG` / `ULRA`.
+//! - All three families (classic UL, pro UQ, pack UM/SymPack).
+//! - Classic 8-bit: predictors NONE / LEFT / GRADIENT / MEDIAN.
+//! - Pro 10-bit: predictors NONE / LEFT (GRADIENT/MEDIAN silently
+//!   treated as NONE per the decoder spec); 1024-symbol Huffman;
+//!   10-bit mod-1024 arithmetic; header at packet start.
+//! - Pack SymPack: two-stream block-of-8 LE bit coder; GRADIENT
+//!   predictor hardcoded; no byte swap.
+//! - Interlaced re-pairing for classic family.
+//! - G-centred RGB inverse colour transform (8-bit and 10-bit).
 //!
-//! Verified against `ffmpeg -c:v utvideo` output: `ULRG` (gbrp),
-//! `ULRA` (gbrap), `ULY0` (yuv420p), `ULY2` (yuv422p), and `ULY4`
-//! (yuv444p) decode bit-exactly across the predictors FFmpeg can
-//! emit (NONE, LEFT, MEDIAN — FFmpeg rejects `-pred gradient`).
-//!
-//! ## What's not yet wired
-//!
-//! - Pro UQ (10-bit) — `PlaneShape` + 8-byte extradata accepted;
-//!   per-frame layout walker (trace doc §6) not yet implemented.
-//!   `UtVideoDecoder::new` rejects with an explicit message.
-//! - Pack UM (SymPack) — `PlaneShape` + 16-byte extradata accepted;
-//!   the two-stream block-of-8 raw-bits coder (trace doc §7 / §12.5)
-//!   is not yet implemented. `UtVideoDecoder::new` rejects with an
-//!   explicit message.
-//! - Interlaced re-pairing — flag parsed, not yet applied.
-//! - Container/registry hookup — the [`register`] entry point is in
-//!   place but the [`make_decoder`] path is exercised primarily via
-//!   the standalone [`decode_packet`] helper today.
+//! Verified against `ffmpeg -c:v utvideo` output for classic family
+//! and against ffmpeg's utvideo decoder for UQ/UM self-encoded
+//! fixtures.
 //!
 //! See `README.md` for the full coverage matrix.
 
