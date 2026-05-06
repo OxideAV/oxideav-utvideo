@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-utvideo/compare/v0.0.2...v0.0.3) - 2026-05-06
+
+### Other
+
+- prepend retirement notice (docs audit 2026-05-06)
+- add classic-family encoder (ULRG/ULRA/ULY0/ULY2/ULY4)
+- add UQ 10-bit + UM SymPack decoders and interlaced GRADIENT/MEDIAN fix
+
 ### Added
 
 - **Classic-family encoder**: `encode_frame` produces bit-exact
