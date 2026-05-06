@@ -1,5 +1,5 @@
-//! Pure-Rust decoder for **Ut Video**, Takeshi Umezawa's lossless
-//! intra-only codec.
+//! Pure-Rust encoder + decoder for **Ut Video**, Takeshi Umezawa's
+//! lossless intra-only codec.
 //!
 //! Ut Video is a fast lossless intra-only codec built on per-plane
 //! canonical Huffman over fixed inverse predictors (NONE / LEFT /
@@ -26,18 +26,29 @@
 //! and against ffmpeg's utvideo decoder for UQ/UM self-encoded
 //! fixtures.
 //!
+//! ## What this crate encodes today
+//!
+//! - Classic 8-bit family (`ULRG`, `ULRA`, `ULY0`, `ULY2`, `ULY4`)
+//!   with all four predictors (NONE / LEFT / GRADIENT / MEDIAN);
+//!   per-frame predictor pick by entropy-cost RDO. Bit-exact via
+//!   self-roundtrip and via `ffmpeg -c:v utvideo` cross-decode (we
+//!   encode → ffmpeg decodes → input recovered) for every (FourCC,
+//!   predictor) combo. See [`encode_frame`] and [`EncoderConfig`].
+//!
 //! See `README.md` for the full coverage matrix.
 
 #![deny(unsafe_code)]
 #![allow(clippy::needless_range_loop)]
 
 pub mod decoder;
+pub mod encoder;
 pub mod extradata;
 pub mod fourcc;
 pub mod huffman;
 pub mod predictor;
 
 pub use decoder::{decode_packet, DecodedFrame, UtVideoDecoder};
+pub use encoder::{encode_frame, EncodedFrame, EncoderConfig};
 pub use extradata::{ExtraData, Flags};
 pub use fourcc::{Family, FourCc, PlaneShape};
 

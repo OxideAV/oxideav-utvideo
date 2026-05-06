@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Classic-family encoder**: `encode_frame` produces bit-exact
+  Ut Video packets for `ULRG`, `ULRA`, `ULY0`, `ULY2`, `ULY4` with
+  all four predictors (NONE / LEFT / GRADIENT / MEDIAN). Per-frame
+  predictor selection is automatic via entropy-cost RDO across the
+  four candidates (caller can also pin one via `with_predictor`).
+  Per-plane canonical Huffman is built from the residual histogram
+  with a length-limit pass to ≤ 16 bits; the single-symbol fast path
+  emits zero-byte slice data when a plane is constant. Forward
+  predictors mirror the decoder's inverse formulas exactly (including
+  the row-1 col-0 MEDIAN `c=a` collapse and the LEFT linear-scan
+  carry across rows). Bitstream is packed 4 bytes at a time with the
+  byte-reversal that the decoder's `byteswap_dwords` undoes.
+- 12 new ffmpeg cross-decode tests in `tests/ffmpeg_encode_interop.rs`:
+  we encode a synthetic frame, wrap it in a minimal AVI written by the
+  test, ask the system `ffmpeg` to decode it back to raw planar bytes,
+  and assert exact equality against the input — exercising every
+  (FourCC, predictor) combo end-to-end through an external decoder.
+  Tests are silently skipped if `ffmpeg` is not on `PATH`.
+- 12 new in-tree unit tests covering forward/inverse round-trip per
+  predictor, canonical-Huffman length building (single-symbol fast
+  path + Kraft equality), and end-to-end self-roundtrip per FourCC.
+- Public `HuffTable::codeword_of` (was test-only) so the encoder can
+  reuse the decoder's canonical-Huffman builder for the per-symbol
+  codeword lookup.
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-utvideo/compare/v0.0.1...v0.0.2) - 2026-05-04
 
 ### Other

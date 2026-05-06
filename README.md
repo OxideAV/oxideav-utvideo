@@ -1,8 +1,8 @@
 # oxideav-utvideo
 
-Pure-Rust decoder for **Ut Video**, Takeshi Umezawa's lossless intra-only
-video codec — 8-bit classic family today (`ULRG`, `ULRA`, `ULY0/2/4`,
-`ULH0/2/4`). Zero C dependencies.
+Pure-Rust **encoder + decoder** for **Ut Video**, Takeshi Umezawa's
+lossless intra-only video codec — 8-bit classic family today (`ULRG`,
+`ULRA`, `ULY0/2/4`, `ULH0/2/4`). Zero C dependencies.
 
 Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace)
 framework but usable standalone.
@@ -28,6 +28,7 @@ oxideav-utvideo = "0.0"
 | RGB G-centred inverse transform   | yes (ULRG / ULRA)                                              |
 | Multi-slice packets               | yes                                                            |
 | Interop (FFmpeg → us)             | bit-exact for ULRG, ULRA, ULY0, ULY2, ULY4 with predictors NONE/LEFT/MEDIAN (15 fixtures); GRADIENT not exercised — FFmpeg's encoder rejects it (`AVERROR_PATCHWELCOME`) so no third-party reference exists |
+| Encoder (classic family)          | `ULRG`, `ULRA`, `ULY0`, `ULY2`, `ULY4` with all 4 predictors (NONE/LEFT/GRADIENT/MEDIAN) + per-frame RDO predictor pick; 12 ffmpeg cross-decode tests bit-exact (we encode → ffmpeg decodes → input recovered) |
 
 ## Not yet implemented
 
@@ -52,6 +53,23 @@ let frame = decode_packet(
 )?;
 // frame.planes[0..3] = G, B, R for ULRG  (or Y, U, V for ULY*)
 ```
+
+### Encoder
+
+```rust
+use oxideav_utvideo::{encode_frame, EncoderConfig, FourCc};
+
+let cfg = EncoderConfig::new(FourCc(*b"ULY2"), width, height)
+    .with_slices(2);                // .with_predictor(...) to pin one
+let enc = encode_frame(&cfg, &[&y_plane, &u_plane, &v_plane])?;
+// enc.extradata is the 16-byte classic blob; enc.packet is the
+// container-ready frame body that round-trips through the decoder
+// and through `ffmpeg -c:v utvideo`.
+```
+
+The encoder picks the predictor per frame by entropy-cost RDO across
+NONE/LEFT/GRADIENT/MEDIAN; pin one explicitly via `with_predictor`
+when you want a deterministic test fixture.
 
 ## Implementation notes
 

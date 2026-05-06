@@ -115,7 +115,7 @@ fn apply_gradient_interlaced(plane: &mut [u8], width: usize, slice_height: usize
     //     row y-2 boundary within the stride-2 field ordering).
     for y in 2..slice_height {
         let i0 = y * width; // index of (y, 0)
-        // a = linear-scan left = last pixel of row y-1.
+                            // a = linear-scan left = last pixel of row y-1.
         let a = plane[i0 - 1];
         let c = plane[(y - 2) * width]; // above (row y-2, col 0)
         let b_col0 = if y % 2 == 0 {
@@ -164,7 +164,11 @@ fn apply_median_interlaced(plane: &mut [u8], width: usize, slice_height: usize) 
                 // For y>=2, row y-2 exists; col 0 wrap to last pixel of row y-3.
                 // But row y-3 might not exist (y==2 → y-3 would be row -1).
                 // Use the same collapse as progressive median: c = a when undefined.
-                if y == 2 { a } else { plane[(y - 2) * width - 1] }
+                if y == 2 {
+                    a
+                } else {
+                    plane[(y - 2) * width - 1]
+                }
             } else {
                 plane[(y - 2) * width + x - 1]
             };
@@ -304,12 +308,7 @@ fn median3(a: u8, b: u8, c: u8) -> u8 {
 /// 10-bit samples stored as `u16` (little-endian, high 6 bits zero).
 /// `plane` is `width × slice_height` `u16` values row-major.
 /// Operates mod 1024; LEFT seed is `0x200`.
-pub fn apply_inverse_10bit(
-    pred: Predictor,
-    plane: &mut [u16],
-    width: usize,
-    slice_height: usize,
-) {
+pub fn apply_inverse_10bit(pred: Predictor, plane: &mut [u16], width: usize, slice_height: usize) {
     if width == 0 || slice_height == 0 {
         return;
     }

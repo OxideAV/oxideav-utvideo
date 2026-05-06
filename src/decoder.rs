@@ -23,8 +23,8 @@ use crate::extradata::ExtraData;
 use crate::fourcc::{Family, FourCc, PlaneShape};
 use crate::huffman::{byteswap_dwords, BitReader, HuffTable, HuffTable10, LeBitReader};
 use crate::predictor::{
-    apply_inverse_10bit, apply_inverse_8bit, apply_inverse_8bit_interlaced,
-    restore_g_centred_rgb, restore_g_centred_rgb_10bit, Predictor,
+    apply_inverse_10bit, apply_inverse_8bit, apply_inverse_8bit_interlaced, restore_g_centred_rgb,
+    restore_g_centred_rgb_10bit, Predictor,
 };
 
 /// Output of one packet decode. Each plane is `width × height` bytes
@@ -426,9 +426,7 @@ impl UtVideoDecoder {
         let packed_sizes_bytes = 4 * n_entries;
         let ctrl_sizes_bytes = 4 * n_entries;
         if pos + packed_sizes_bytes + ctrl_sizes_bytes > packet.len() {
-            return Err(Error::invalid(
-                "Ut Video UM: truncated size tables",
-            ));
+            return Err(Error::invalid("Ut Video UM: truncated size tables"));
         }
 
         // Read packed_stream_size per (plane, slice) — layout is plane-major.

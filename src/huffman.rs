@@ -142,9 +142,10 @@ impl HuffTable {
         })))
     }
 
-    /// Encode-side helper used only by tests: look up a symbol's
-    /// codeword (without the MSB pad).
-    #[cfg(test)]
+    /// Encode-side helper used by the encoder and by tests: look up a
+    /// symbol's codeword (without the MSB pad). Returns the codeword
+    /// right-aligned in `u32` and the bit length, or `None` if the
+    /// symbol is absent from the table.
     pub fn codeword_of(&self, sym: u8) -> Option<(u32, u8)> {
         match self {
             HuffTable::Fill { symbol } => {
@@ -322,9 +323,7 @@ impl HuffTable10 {
         // Single-symbol fill path.
         for (sym, &len) in lens.iter().enumerate() {
             if len == 0 {
-                return Ok(HuffTable10::Fill {
-                    symbol: sym as u16,
-                });
+                return Ok(HuffTable10::Fill { symbol: sym as u16 });
             }
         }
         let mut entries: Vec<(u16, u8)> = Vec::with_capacity(128);
