@@ -6,6 +6,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-utvideo/releases/tag/v0.0.2) - 2026-05-07
+
+### Other
+
+- Round 2 — exhaustive pattern matrix (corpus hardening)
+- Round 1 — classic-family decoder + encoder
+- Round 0 — clean-room rebuild scaffold (orphan master)
+
 ### Added
 
 - **Round 2 — exhaustive pattern matrix.** New integration suite at
