@@ -1,0 +1,17 @@
+[package]
+name = "oxideav-utvideo"
+version = "0.0.2"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-utvideo"
+homepage = "https://github.com/OxideAV/oxideav-utvideo"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust Ut Video lossless decoder for the oxideav framework"
+
+readme = "README.md"
+keywords = ["multimedia", "video", "utvideo", "lossless", "codec"]
+categories = ["multimedia::encoding", "multimedia::video"]
+
+[dependencies]
+oxideav-core = "0.1"
