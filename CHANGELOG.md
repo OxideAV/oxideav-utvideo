@@ -8,6 +8,32 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 2 — exhaustive pattern matrix.** New integration suite at
+  `tests/round2_pattern_matrix.rs` that mirrors the Auditor Round 1
+  test matrix (`docs/video/utvideo/audit/01-validation-report.md`
+  §3.1) into a Rust self-roundtrip suite. Coverage:
+  - 5 FourCC × 4 predictor × 8 patterns
+    (`zeros`, `mid`, `ones`, `gradient`, `ramp_x`, `ramp_y`,
+    `checker`, deterministic-LCG `random`) × 11 sizes
+    (`2×2..64×48` plus odd-W and odd-H corners) × {1, 2, 4, 8} slices,
+    filtered against `spec/02` §3.2 dimension constraints and the
+    "every slice must contain at least one row" sanity guard.
+  - Edge-case probes: 1×1 (ULY4 / ULRG / ULRA only), 2×2, thin-strip
+    1×N and N×1, tall-thin 8×240, wide-short 1280×8, 16-slice
+    one-row-per-slice, ULRA non-trivial alpha (verifies the alpha
+    plane bypasses the `spec/04` §6 RGB decorrelation), solid-colour
+    sweep over 7 luma values and every FourCC × predictor pair.
+  - Encoder-determinism probe (`double_roundtrip_bytes_stable`):
+    `encode → decode → re-encode` produces identical bytes — a
+    constructive check on the package-merge tie-breaking.
+
+  This adds 16 integration tests on top of round 1's 49 unit tests
+  (65 total) and exercises ~3 000 self-roundtrip cells per `cargo
+  test` invocation. Round 1 already implemented every documented
+  FourCC + predictor + RGB decorrelation; round 2 broadens the
+  corpus to the Auditor's 1018-cell Variant-B matrix without
+  introducing new wire-format surface.
+
 - **Round 1 — classic-family decoder + encoder.** Full Ut Video
   classic-family wire-format support: ULRG / ULRA / ULY0 / ULY2 /
   ULY4. Built clean-room against `docs/video/utvideo/spec/00..06`
