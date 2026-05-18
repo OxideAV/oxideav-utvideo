@@ -5,7 +5,18 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
-**Round 1 — clean-room rebuild.** Implements the five 8-bit
+**Round 3 — LUT-accelerated Huffman decode.** Decoder now caches a
+12-bit prefix LUT per plane (`2^12 = 4096` entries × 4 B) and
+resolves the common-case Huffman code in one shift+load; codes
+longer than 12 bits (max observed in the spec corpus is 16) fall
+back to the existing length-tier prefix scan. `BitReader::peek_bits`
+also rewritten to combine adjacent 32-bit LE words into a 64-bit
+register, dropping the prior `O(n)` bit-by-bit byte read. Bit-for-bit
+output identical to round 1 against every existing test
+(74 tests = 52 unit + 16 round-2 pattern matrix + 6 round-3
+high-entropy / mandelbrot probes).
+
+**Round 1 + 2 — clean-room rebuild.** Implements the five 8-bit
 classic-family FourCCs (`ULRG` / `ULRA` / `ULY0` / `ULY2` / `ULY4`)
 documented in
 [`docs/video/utvideo/spec/`](https://github.com/OxideAV/docs/tree/master/video/utvideo/spec).

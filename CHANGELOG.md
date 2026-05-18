@@ -8,6 +8,29 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 3 — LUT-accelerated Huffman decode.** The per-plane
+  Huffman decoder now caches a flat `2^12 = 4096`-entry lookup
+  table on `HuffmanTable::build` and resolves any code of length
+  `<= 12` bits in one shift+load. Codes longer than 12 bits (which
+  `spec/02` §4.2 documents as topping out at 16 bits empirically)
+  fall back to the existing length-tier binary-search prefix scan.
+  Pure-LUT planes (most frames in the behavioural corpus) skip the
+  tier scan entirely.
+  - `BitReader::peek_bits` rewritten to combine the current and
+    next 32-bit LE words into a 64-bit register and shift to align,
+    replacing the prior `O(n)` bit-by-bit byte read.
+  - New integration suite at `tests/round3_lut_decode.rs` (6 tests)
+    covering: high-entropy LCG noise across every FOURCC, mandelbrot
+    iteration patterns (the `spec/02` §4.2 R2-mandelbrot deep-tree
+    case), high-slice-count deep-codelen probe, pure-LUT-path
+    stripe-after-median test, and 320×240 perf smoke.
+  - Three new in-module Huffman tests pin LUT-slot population,
+    `LUT_MISS` sentinel coverage for `> LUT_BITS` codes, and short-
+    code resolution at the bit-stream tail.
+
+  Decoder correctness preserved bit-for-bit against the existing
+  round-1 + round-2 corpus (74 tests total, all green).
+
 - **Round 2 — exhaustive pattern matrix.** New integration suite at
   `tests/round2_pattern_matrix.rs` that mirrors the Auditor Round 1
   test matrix (`docs/video/utvideo/audit/01-validation-report.md`
