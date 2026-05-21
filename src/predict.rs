@@ -180,75 +180,91 @@ pub fn forward(
     for s_idx in 0..num_slices {
         let r_start = (plane_height * s_idx) / num_slices;
         let r_end = (plane_height * (s_idx + 1)) / num_slices;
-        let rows = r_end - r_start;
-        let mut residuals = Vec::with_capacity(rows * width);
-        match pred {
-            Predictor::None => {
-                for r in r_start..r_end {
-                    for c in 0..width {
-                        residuals.push(plane[r * width + c]);
-                    }
-                }
-            }
-            Predictor::Left => {
-                let mut prev: u8 = 128;
-                for r in r_start..r_end {
-                    for c in 0..width {
-                        let s = plane[r * width + c];
-                        residuals.push(s.wrapping_sub(prev));
-                        prev = s;
-                    }
-                }
-            }
-            Predictor::Gradient => {
-                for r in r_start..r_end {
-                    for c in 0..width {
-                        let p: u8 = if r == r_start && c == 0 {
-                            128
-                        } else if r == r_start {
-                            plane[r * width + c - 1]
-                        } else if c == 0 {
-                            plane[(r - 1) * width]
-                        } else {
-                            let a = plane[r * width + c - 1];
-                            let b = plane[(r - 1) * width + c];
-                            let c2 = plane[(r - 1) * width + c - 1];
-                            a.wrapping_add(b).wrapping_sub(c2)
-                        };
-                        residuals.push(plane[r * width + c].wrapping_sub(p));
-                    }
-                }
-            }
-            Predictor::Median => {
-                for r in r_start..r_end {
-                    for c in 0..width {
-                        let p: u8 = if r == r_start && c == 0 {
-                            128
-                        } else if r == r_start {
-                            plane[r * width + c - 1]
-                        } else if c == 0 {
-                            let a = plane[(r - 1) * width + (width - 1)];
-                            let b = plane[(r - 1) * width];
-                            if r == r_start + 1 {
-                                b
-                            } else {
-                                let c2 = plane[(r - 2) * width + (width - 1)];
-                                med(a, b, c2)
-                            }
-                        } else {
-                            let a = plane[r * width + c - 1];
-                            let b = plane[(r - 1) * width + c];
-                            let c2 = plane[(r - 1) * width + c - 1];
-                            med(a, b, c2)
-                        };
-                        residuals.push(plane[r * width + c].wrapping_sub(p));
-                    }
+        out.push(forward_slice(pred, plane, width, r_start, r_end));
+    }
+    out
+}
+
+/// Forward predictor on **one** slice's row range of a plane. The
+/// slice's first-pixel seed is always `128` (`spec/04` §§3.1, 4, 5, 7),
+/// matching [`apply_slice`] on the decode side; the slice reads samples
+/// only from rows `r_start..r_end` of `plane`, so the work is fully
+/// independent across slices and is what the round-5 parallel encoder
+/// dispatches to per-thread workers.
+pub fn forward_slice(
+    pred: Predictor,
+    plane: &[u8],
+    width: usize,
+    r_start: usize,
+    r_end: usize,
+) -> Vec<u8> {
+    let rows = r_end - r_start;
+    let mut residuals = Vec::with_capacity(rows * width);
+    match pred {
+        Predictor::None => {
+            for r in r_start..r_end {
+                for c in 0..width {
+                    residuals.push(plane[r * width + c]);
                 }
             }
         }
-        out.push(residuals);
+        Predictor::Left => {
+            let mut prev: u8 = 128;
+            for r in r_start..r_end {
+                for c in 0..width {
+                    let s = plane[r * width + c];
+                    residuals.push(s.wrapping_sub(prev));
+                    prev = s;
+                }
+            }
+        }
+        Predictor::Gradient => {
+            for r in r_start..r_end {
+                for c in 0..width {
+                    let p: u8 = if r == r_start && c == 0 {
+                        128
+                    } else if r == r_start {
+                        plane[r * width + c - 1]
+                    } else if c == 0 {
+                        plane[(r - 1) * width]
+                    } else {
+                        let a = plane[r * width + c - 1];
+                        let b = plane[(r - 1) * width + c];
+                        let c2 = plane[(r - 1) * width + c - 1];
+                        a.wrapping_add(b).wrapping_sub(c2)
+                    };
+                    residuals.push(plane[r * width + c].wrapping_sub(p));
+                }
+            }
+        }
+        Predictor::Median => {
+            for r in r_start..r_end {
+                for c in 0..width {
+                    let p: u8 = if r == r_start && c == 0 {
+                        128
+                    } else if r == r_start {
+                        plane[r * width + c - 1]
+                    } else if c == 0 {
+                        let a = plane[(r - 1) * width + (width - 1)];
+                        let b = plane[(r - 1) * width];
+                        if r == r_start + 1 {
+                            b
+                        } else {
+                            let c2 = plane[(r - 2) * width + (width - 1)];
+                            med(a, b, c2)
+                        }
+                    } else {
+                        let a = plane[r * width + c - 1];
+                        let b = plane[(r - 1) * width + c];
+                        let c2 = plane[(r - 1) * width + c - 1];
+                        med(a, b, c2)
+                    };
+                    residuals.push(plane[r * width + c].wrapping_sub(p));
+                }
+            }
+        }
     }
-    out
+    residuals
 }
 
 /// RGB inverse decorrelation per `spec/04` §6: the encoder stored

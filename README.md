@@ -5,7 +5,29 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
-**Round 4 — slice-parallel decode.** `decode_frame` now auto-dispatches
+**Round 5 — slice-parallel encode.** `encode_frame` now auto-dispatches
+multi-slice frames whose pixel count crosses
+`encoder::PARALLEL_PIXEL_THRESHOLD` (64 Ki px ≈ 320×200) onto a
+`std::thread::scope` pool, mirroring the round-4 decoder fan-out.
+Within each plane both stages that are slice-independent per the
+spec — forward predict (per-slice `+128` seed, `spec/04` §§3.1, 4, 5,
+7) and per-slice Huffman bit-pack (self-contained per-slice
+bit-stream, `spec/02` §5) — fan out across worker threads; the
+per-plane Huffman code-length build sits between them on the parent
+thread (it aggregates a cross-slice histogram). Output bytes match
+the serial path exactly on the 288-cell ULY0 matrix + RGB family +
+256-slice stress + roundtrip suite. Measured 320×240 → 1280×720 ULY4
+8-slice encode (gradient): serial 1.94 → 9.29 ms, parallel 1.72 →
+2.84 ms, **1.13× → 3.28× speedup** on an 8-core host. The encoder's
+speedup ceiling is lower than the decoder's because the per-plane
+Huffman length build (histogram + package-merge) is single-threaded
+by construction — the parallel slices share one codebook per plane.
+Explicit `encode_frame_serial` / `encode_frame_parallel` entry
+points are kept for latency-sensitive callers or threadpool-driven
+flows. 87 tests = 52 unit + 16 round-2 matrix + 6 round-3 LUT + 6
+round-4 parallel-decode + 7 round-5 parallel-encode.
+
+**Round 4 — slice-parallel decode.** `decode_frame` auto-dispatches
 multi-slice frames whose pixel count crosses
 `PARALLEL_PIXEL_THRESHOLD` (64 Ki px ≈ 320×200) onto a
 `std::thread::scope` pool sized at
@@ -18,9 +40,7 @@ Measured 320×240 → 1280×720 ULY4 8-slice decode (gradient): serial
 1.44 → 8.95 ms, parallel 0.50 → 1.59 ms, **2.87× → 5.63× speedup**
 on an 8-core host. Explicit `decode_frame_serial` /
 `decode_frame_parallel` entry points are kept for latency-sensitive
-or threadpool-controlled callers. 80 tests = 52 unit + 16 round-2
-matrix + 6 round-3 LUT probes + 6 round-4 parallel-correctness
-probes.
+or threadpool-controlled callers.
 
 **Round 3 — LUT-accelerated Huffman decode.** Decoder caches a
 12-bit prefix LUT per plane (`2^12 = 4096` entries × 4 B) and

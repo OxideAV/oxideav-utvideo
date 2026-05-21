@@ -8,6 +8,66 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 5 — slice-parallel encode.** Mirror of the round-4
+  decoder fan-out. `encode_frame` now auto-dispatches multi-slice
+  frames whose luma pixel count crosses
+  [`encoder::PARALLEL_PIXEL_THRESHOLD`] (64 Ki pixels, same threshold
+  as the decoder) onto a `std::thread::scope` thread pool sized at
+  `min(num_slices, available_parallelism())`. Within each plane the
+  fan-out covers both stages that are slice-independent per the spec:
+  - **Forward predict** (`predict::forward_slice`): every slice's
+    first-pixel seed is `128` (`spec/04` §§3.1, 4, 5, 7), and the
+    predictor reads only samples in its own row range. The slices
+    fan out into disjoint mutable slots of a pre-sized
+    `Vec<Vec<u8>>` (one slot per slice).
+  - **Per-slice Huffman bit-pack**: the per-plane code-length
+    descriptor is built once on the parent thread (it needs the
+    cross-slice histogram), then each slice's `BitWriter`
+    invocation runs on a worker. Every slice's Huffman bit-stream
+    is a self-contained byte blob (`spec/02` §5), so the packs
+    are fully independent.
+
+  Per-plane work itself stays plane-serial: per-plane outputs are 1–4
+  blobs and the per-plane Huffman build is a single histogram + a
+  package-merge length build. The slice-level parallelism within a
+  plane already saturates the pool with 8 slices on an 8-core host.
+
+  Output of the parallel path is **byte-identical** to the serial
+  path on every fixture in the round-5 matrix (288 ULY0 cells +
+  6 RGB cells + 256-slice stress + perf smoke). Explicit
+  `encode_frame_serial` / `encode_frame_parallel` entry points are
+  kept alongside the auto-dispatching `encode_frame` for
+  latency-sensitive single-frame callers or for callers driving a
+  foreign thread-pool.
+
+  Measured wall-clock on an 8-core host (release build, gradient
+  predictor, 8-slice ULY4 luma + UV at 4:4:4):
+  | Frame    | Serial   | Parallel | Speedup |
+  | -------- | -------- | -------- | ------- |
+  | 320×240  | 1.94 ms  | 1.72 ms  | 1.13×   |
+  | 640×480  | 3.40 ms  | 1.75 ms  | 1.94×   |
+  | 1280×720 | 9.29 ms  | 2.84 ms  | 3.28×   |
+
+  Speedup gap vs. the round-4 decoder (5.63× at 1280×720) reflects
+  the encoder's heavier serial-prelude: the per-plane Huffman build
+  (256-bin histogram + package-merge length build) is single-threaded
+  by construction (the parallel slices share one codebook), so the
+  serial fraction stays Amdahl-bounded above the slice fan-out.
+
+  New `predict::forward_slice` helper produces residuals for one
+  slice's row range with the universal `+128` seed in isolation;
+  preserves the existing `predict::forward` plane-level entry for
+  the serial path.
+
+  Test suite at `tests/round5_parallel_encode.rs` (7 tests): ULY0
+  matrix (288 cases of W × H × slices × predictor; byte-equal serial
+  vs. parallel), RGB family (ULRG + ULRA across 3 predictors), auto-
+  dispatch threshold equivalence, 1-slice serial-equiv, 256-slice
+  one-row stress, parallel-encode → serial+parallel-decode end-to-end
+  roundtrip, and a perf smoke. 87 tests total = 52 unit + 16
+  round-2 matrix + 6 round-3 LUT + 6 round-4 parallel-decode + 7
+  round-5 parallel-encode.
+
 - **Round 4 — slice-parallel decode.** `decode_frame` now
   auto-dispatches multi-slice frames over
   `PARALLEL_PIXEL_THRESHOLD` (64 Ki pixels, hand-picked from the
