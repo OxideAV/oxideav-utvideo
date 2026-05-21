@@ -16,11 +16,39 @@
 //! own per-pixel reordering (e.g. R, G, B for an interleaved BGR
 //! buffer) — this is consistent with `oxideav-magicyuv`'s decoded
 //! plane API and keeps the codec free of pixel-packing policy.
+//!
+//! ## Slice-level parallelism (round 4)
+//!
+//! Per `spec/02` §7 "Implementation notes": *"Parallel per-slice
+//! decoding is therefore achievable: a multi-threaded decoder reads
+//! the offset table once per plane, then dispatches the slice-data
+//! byte ranges to per-thread decoders."* The decoder now does exactly
+//! that for frames whose pixel count crosses
+//! [`PARALLEL_PIXEL_THRESHOLD`] and whose slice count is `> 1`. Each
+//! plane's Huffman table is built once, then the slices' Huffman
+//! decodes + inverse-predicts run on a `std::thread::scope`
+//! thread-pool sized at `min(num_slices, available_parallelism())`.
+//!
+//! Slices are fully independent for both stages: every slice's
+//! Huffman bit-stream is self-contained (`spec/02` §5) and every
+//! slice's predictor state restarts at the per-slice `+128` seed
+//! (`spec/04` §§3.1, 4, 5, 7). The parent thread joins all slices'
+//! reconstructed row strips into the per-plane output buffer in
+//! display order before the RGB inverse-decorrelation pass runs.
 
 use crate::error::{Error, Result};
 use crate::fourcc::{Fourcc, Predictor, StreamConfig};
 use crate::huffman::HuffmanTable;
 use crate::predict;
+
+/// Frames whose `width * height` (luma plane) is below this threshold
+/// run the serial-decode path. The thread-spawn + join cost typically
+/// dominates the per-slice decode work for small frames; this bound
+/// reserves the parallel path for `~ 320×240`+ payloads where it
+/// actually pays. The threshold is hand-picked from
+/// `tests/round4_parallel_decode.rs` perf smoke (320×240 = 76 800
+/// pixels lies just above it).
+pub const PARALLEL_PIXEL_THRESHOLD: usize = 64 * 1024;
 
 /// One decoded plane: width × height in `samples`, plus the symbolic
 /// label for the plane (Y, U, V, G, B, R, A) for the FOURCC.
@@ -84,7 +112,59 @@ pub struct DecodedFrame {
 
 /// Decode one Ut Video frame given its `00dc` chunk payload bytes
 /// and a parsed [`StreamConfig`].
+///
+/// Picks the serial or [`PARALLEL_PIXEL_THRESHOLD`]-gated parallel
+/// path automatically. Callers that want explicit control can use
+/// [`decode_frame_serial`] / [`decode_frame_parallel`] directly.
 pub fn decode_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedFrame> {
+    let total = (cfg.width as usize) * (cfg.height as usize);
+    if cfg.num_slices() > 1 && total >= PARALLEL_PIXEL_THRESHOLD {
+        decode_frame_parallel(cfg, chunk_payload)
+    } else {
+        decode_frame_serial(cfg, chunk_payload)
+    }
+}
+
+/// Serial-path decode: one slice after another, single-threaded.
+/// Always used for `num_slices == 1` or for frames smaller than
+/// [`PARALLEL_PIXEL_THRESHOLD`]. Exposed so callers can opt out of
+/// the thread-pool spin-up cost in latency-sensitive single-frame
+/// paths.
+pub fn decode_frame_serial(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedFrame> {
+    let parsed = parse_payload(cfg, chunk_payload)?;
+    finish_decode(cfg, parsed, /*parallel=*/ false)
+}
+
+/// Parallel-path decode: per-slice decode + inverse-predict run on
+/// `std::thread::scope`. Each slice is independent (per-slice +128
+/// seed; self-contained Huffman bit-stream), so the join produces a
+/// bit-exact equivalent of the serial output.
+pub fn decode_frame_parallel(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedFrame> {
+    let parsed = parse_payload(cfg, chunk_payload)?;
+    finish_decode(cfg, parsed, /*parallel=*/ true)
+}
+
+/// Parsed per-plane structure ready to feed into the slice-decode
+/// stage. The slice data is left as a borrowed sub-slice of the
+/// original chunk payload; no copy happens.
+struct ParsedPlane<'a> {
+    label: PlaneLabel,
+    width: usize,
+    height: usize,
+    table: HuffmanTable,
+    /// Per-slice raw bytes (length == `num_slices`).
+    slice_bytes: Vec<&'a [u8]>,
+}
+
+struct ParsedFrame<'a> {
+    planes: Vec<ParsedPlane<'a>>,
+    frame_info: u32,
+}
+
+/// Walk the chunk payload, validating per-plane structure and
+/// building Huffman tables; produces a [`ParsedFrame`] that the
+/// slice-decode stage can fan out (serial or parallel).
+fn parse_payload<'a>(cfg: &StreamConfig, chunk_payload: &'a [u8]) -> Result<ParsedFrame<'a>> {
     let num_slices = cfg.num_slices();
     if num_slices == 0 {
         return Err(Error::InvalidSliceCount);
@@ -158,33 +238,21 @@ pub fn decode_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedF
         let slice_data = &chunk_payload[offset..offset + slice_data_total];
         offset += slice_data_total;
 
-        // Build the per-plane Huffman table and decode each slice.
-        let table = HuffmanTable::build(&code_length)?;
-        let mut slice_residuals: Vec<Vec<u8>> = Vec::with_capacity(num_slices);
+        // Split slice_data into per-slice borrowed subslices.
+        let mut slice_bytes: Vec<&'a [u8]> = Vec::with_capacity(num_slices);
         let mut prev_off = 0usize;
-        for s in 0..num_slices {
-            let r_start = (ph * s) / num_slices;
-            let r_end = (ph * (s + 1)) / num_slices;
-            let n_pixels = (r_end - r_start) * pw;
-            let sd = &slice_data[prev_off..slice_end_offsets[s]];
-            prev_off = slice_end_offsets[s];
-            let res = if n_pixels == 0 {
-                Vec::new()
-            } else {
-                table.decode_slice(sd, n_pixels)?
-            };
-            slice_residuals.push(res);
+        for &end in &slice_end_offsets {
+            slice_bytes.push(&slice_data[prev_off..end]);
+            prev_off = end;
         }
 
-        // Inverse-predict into a `pw * ph` buffer using the predictor
-        // pulled below (we have to peek frame_info first, but we
-        // need the residuals out of the per-plane loop). Defer the
-        // reconstruct to a second pass with `predictor` resolved.
-        planes.push(PendingPlane {
+        let table = HuffmanTable::build(&code_length)?;
+        planes.push(ParsedPlane {
             label: PlaneLabel::for_fourcc(cfg.fourcc, plane_idx),
-            width: pw as u32,
-            height: ph as u32,
-            slice_residuals,
+            width: pw,
+            height: ph,
+            table,
+            slice_bytes,
         });
     }
 
@@ -200,38 +268,62 @@ pub fn decode_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedF
             .try_into()
             .unwrap(),
     );
-    let predictor = Predictor::from_frame_info(frame_info);
+    Ok(ParsedFrame { planes, frame_info })
+}
 
-    // Second pass: inverse predict.
-    let mut decoded_planes: Vec<DecodedPlane> = planes
-        .into_iter()
-        .map(|p| {
-            let mut samples = vec![0u8; (p.width * p.height) as usize];
-            predict::apply(
+/// Finish the decode: dispatch each plane's slice decode + inverse
+/// predict (serial or parallel), apply RGB inverse-decorrelation,
+/// build the [`DecodedFrame`].
+fn finish_decode(
+    cfg: &StreamConfig,
+    parsed: ParsedFrame<'_>,
+    parallel: bool,
+) -> Result<DecodedFrame> {
+    let num_slices = cfg.num_slices();
+    let predictor = Predictor::from_frame_info(parsed.frame_info);
+
+    let mut decoded_planes: Vec<DecodedPlane> = Vec::with_capacity(parsed.planes.len());
+    for plane in parsed.planes {
+        let pw = plane.width;
+        let ph = plane.height;
+        let mut samples = vec![0u8; pw * ph];
+
+        if parallel && num_slices > 1 {
+            decode_plane_parallel(
+                &plane.table,
+                &plane.slice_bytes,
+                num_slices,
+                pw,
+                ph,
                 predictor,
                 &mut samples,
-                p.width as usize,
-                p.height as usize,
+            )?;
+        } else {
+            decode_plane_serial(
+                &plane.table,
+                &plane.slice_bytes,
                 num_slices,
-                &p.slice_residuals,
-            );
-            DecodedPlane {
-                label: p.label,
-                width: p.width,
-                height: p.height,
-                samples,
-            }
-        })
-        .collect();
+                pw,
+                ph,
+                predictor,
+                &mut samples,
+            )?;
+        }
 
-    // RGB inverse decorrelation per `spec/04` §6.
+        decoded_planes.push(DecodedPlane {
+            label: plane.label,
+            width: pw as u32,
+            height: ph as u32,
+            samples,
+        });
+    }
+
     if cfg.fourcc.is_rgb_family() {
         let g_clone = decoded_planes[0].samples.clone();
         let (_, rest) = decoded_planes.split_first_mut().unwrap();
         let (b_plane, rest2) = rest.split_first_mut().unwrap();
         let r_plane = &mut rest2[0];
         predict::inverse_decorrelate_rgb(&g_clone, &mut b_plane.samples, &mut r_plane.samples);
-        // Alpha plane (idx 3) of ULRA is direct — no transform.
     }
 
     Ok(DecodedFrame {
@@ -240,15 +332,146 @@ pub fn decode_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedF
         height: cfg.height,
         predictor,
         planes: decoded_planes,
-        frame_info,
+        frame_info: parsed.frame_info,
     })
 }
 
-struct PendingPlane {
-    label: PlaneLabel,
-    width: u32,
-    height: u32,
-    slice_residuals: Vec<Vec<u8>>,
+/// Serial-path per-plane decode: decode each slice, then inverse-predict
+/// directly into the per-slice row range of `out`.
+fn decode_plane_serial(
+    table: &HuffmanTable,
+    slice_bytes: &[&[u8]],
+    num_slices: usize,
+    pw: usize,
+    ph: usize,
+    predictor: Predictor,
+    out: &mut [u8],
+) -> Result<()> {
+    debug_assert_eq!(slice_bytes.len(), num_slices);
+    debug_assert_eq!(out.len(), pw * ph);
+    for (s, sb) in slice_bytes.iter().enumerate().take(num_slices) {
+        let r_start = (ph * s) / num_slices;
+        let r_end = (ph * (s + 1)) / num_slices;
+        let rows = r_end - r_start;
+        let n_pixels = rows * pw;
+        if n_pixels == 0 {
+            continue;
+        }
+        let residuals = table.decode_slice(sb, n_pixels)?;
+        let slice_out = &mut out[r_start * pw..r_end * pw];
+        predict::apply_slice(predictor, slice_out, pw, rows, &residuals);
+    }
+    Ok(())
+}
+
+/// Parallel-path per-plane decode: dispatch slices across a
+/// `std::thread::scope` thread pool. The output buffer is split
+/// row-wise (`split_at_mut`) so every thread owns a disjoint
+/// `slice_rows * pw` mutable strip. Errors propagate via the join
+/// — the first failing slice wins.
+fn decode_plane_parallel(
+    table: &HuffmanTable,
+    slice_bytes: &[&[u8]],
+    num_slices: usize,
+    pw: usize,
+    ph: usize,
+    predictor: Predictor,
+    out: &mut [u8],
+) -> Result<()> {
+    debug_assert_eq!(slice_bytes.len(), num_slices);
+    debug_assert_eq!(out.len(), pw * ph);
+
+    // Compute per-slice (r_start, rows) and split the output buffer
+    // into disjoint row strips, one per slice.
+    let mut strip_specs: Vec<(usize, usize)> = Vec::with_capacity(num_slices);
+    for s in 0..num_slices {
+        let r_start = (ph * s) / num_slices;
+        let r_end = (ph * (s + 1)) / num_slices;
+        strip_specs.push((r_start, r_end - r_start));
+    }
+
+    // Build a Vec of disjoint mutable strips by walking `out` and
+    // splitting off each slice's `rows * pw` bytes in turn.
+    let mut strips: Vec<&mut [u8]> = Vec::with_capacity(num_slices);
+    let mut remaining: &mut [u8] = out;
+    for &(_, rows) in &strip_specs {
+        let take = rows * pw;
+        let (head, tail) = remaining.split_at_mut(take);
+        strips.push(head);
+        remaining = tail;
+    }
+    debug_assert!(remaining.is_empty());
+
+    // Bound the thread fanout. `available_parallelism` is the official
+    // way to do this in std without a thread-pool crate; we cap at
+    // `num_slices` because more threads than tasks is pointless.
+    let par = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(num_slices)
+        .max(1);
+
+    // Use std::thread::scope so non-'static borrows of `slice_bytes` +
+    // `table` are sound. Errors are collected by index then merged.
+    let errors: std::sync::Mutex<Option<(usize, Error)>> = std::sync::Mutex::new(None);
+
+    std::thread::scope(|scope| {
+        // Pair (strip, slice_idx, rows) for thread dispatch.
+        let mut work: Vec<(&mut [u8], usize, usize)> = strips
+            .into_iter()
+            .enumerate()
+            .map(|(s, strip)| (strip, s, strip_specs[s].1))
+            .collect();
+
+        // Chunk slices across `par` threads in round-robin order to
+        // keep the work distribution roughly balanced even when slice
+        // sizes vary.
+        let chunk_size = work.len().div_ceil(par);
+        let mut chunks: Vec<Vec<(&mut [u8], usize, usize)>> = Vec::with_capacity(par);
+        for _ in 0..par {
+            chunks.push(Vec::new());
+        }
+        for (i, item) in work.drain(..).enumerate() {
+            let bucket = i / chunk_size.max(1);
+            chunks[bucket.min(par - 1)].push(item);
+        }
+
+        let errors_ref = &errors;
+        for chunk in chunks {
+            scope.spawn(move || {
+                for (strip, s_idx, rows) in chunk {
+                    let n_pixels = rows * pw;
+                    if n_pixels == 0 {
+                        continue;
+                    }
+                    let res = table.decode_slice(slice_bytes[s_idx], n_pixels);
+                    match res {
+                        Ok(residuals) => {
+                            predict::apply_slice(predictor, strip, pw, rows, &residuals);
+                        }
+                        Err(e) => {
+                            let mut guard = errors_ref.lock().unwrap();
+                            let take = guard
+                                .as_ref()
+                                .map(|(prev, _)| s_idx < *prev)
+                                .unwrap_or(true);
+                            if take {
+                                *guard = Some((s_idx, e));
+                            }
+                            // Continue draining the chunk so other
+                            // threads can finish; the first-failing
+                            // slice's error still wins.
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    if let Some((_, e)) = errors.into_inner().unwrap() {
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

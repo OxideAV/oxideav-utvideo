@@ -66,6 +66,32 @@ pub fn apply(
     }
 }
 
+/// Apply inverse prediction to **one** slice's row strip in isolation.
+/// `strip` is exactly `rows * width` bytes, treated as row 0..rows of
+/// an independent slice with the universal `+128` first-pixel seed
+/// (per `spec/04` §§3.1, 4, 5, 7 — every slice's column 0 of row 0 is
+/// `residual + 128`). All inter-row references inside the slice live
+/// inside `strip`; nothing outside the strip is read or written.
+///
+/// This is the building block the round-4 slice-parallel decoder uses
+/// — each slice owns a disjoint mutable strip and applies the
+/// predictor in place.
+pub fn apply_slice(pred: Predictor, strip: &mut [u8], width: usize, rows: usize, residuals: &[u8]) {
+    debug_assert_eq!(strip.len(), width * rows);
+    debug_assert_eq!(residuals.len(), width * rows);
+    // The pre-existing per-mode helpers operate on a `(r_start, r_end)`
+    // sub-range of a larger plane buffer. For a single-slice strip we
+    // reuse them with `r_start = 0, r_end = rows` over the strip
+    // itself — which is exactly what they would do for any independent
+    // slice, by the spec's per-slice seed convention.
+    match pred {
+        Predictor::None => apply_none(strip, width, 0, rows, residuals),
+        Predictor::Left => apply_left(strip, width, 0, rows, residuals),
+        Predictor::Gradient => apply_gradient(strip, width, 0, rows, residuals),
+        Predictor::Median => apply_median(strip, width, 0, rows, residuals),
+    }
+}
+
 fn apply_none(plane: &mut [u8], width: usize, r_start: usize, r_end: usize, residuals: &[u8]) {
     let mut i = 0usize;
     for r in r_start..r_end {

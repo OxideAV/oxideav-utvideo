@@ -8,6 +8,37 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 4 — slice-parallel decode.** `decode_frame` now
+  auto-dispatches multi-slice frames over
+  `PARALLEL_PIXEL_THRESHOLD` (64 Ki pixels, hand-picked from the
+  perf-smoke matrix) onto a `std::thread::scope` pool sized at
+  `min(num_slices, available_parallelism())`. The per-plane Huffman
+  table is built once on the parent thread, then the per-slice
+  decode + inverse-predict run on disjoint mutable row strips of the
+  output buffer (`split_at_mut`), so no synchronisation is needed
+  inside a plane. The first failing slice's error wins on the join.
+  - Slices are fully independent per the spec: the +128 first-pixel
+    seed restarts at every slice (`spec/04` §§3.1, 4, 5, 7) and
+    every slice's Huffman bit-stream is self-contained (`spec/02`
+    §5). The parallel path is therefore bit-exact equivalent to the
+    serial path, verified across a 192-cell ULY0 W×H×slices×predictor
+    matrix plus dedicated ULRG / ULRA / 256-slice / single-slice
+    probes (`tests/round4_parallel_decode.rs`, 6 tests).
+  - Explicit `decode_frame_serial` and `decode_frame_parallel` entry
+    points kept alongside the auto-dispatching `decode_frame` for
+    latency-sensitive single-frame callers or for callers that want
+    to drive a foreign thread-pool.
+  - Measured wall-clock on an 8-core host (release build, gradient
+    predictor, 8-slice ULY4 luma+UV):
+    | Frame    | Serial   | Parallel | Speedup |
+    | -------- | -------- | -------- | ------- |
+    | 320×240  | 1.44 ms  | 0.50 ms  | 2.87×   |
+    | 640×480  | 3.62 ms  | 0.76 ms  | 4.76×   |
+    | 1280×720 | 8.95 ms  | 1.59 ms  | 5.63×   |
+  - New `predict::apply_slice` helper applies inverse prediction to
+    one slice's row strip in isolation; preserves the existing
+    `predict::apply` plane-level entry for the serial path.
+
 - **Round 3 — LUT-accelerated Huffman decode.** The per-plane
   Huffman decoder now caches a flat `2^12 = 4096`-entry lookup
   table on `HuffmanTable::build` and resolves any code of length

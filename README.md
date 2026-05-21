@@ -5,16 +5,30 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
-**Round 3 — LUT-accelerated Huffman decode.** Decoder now caches a
+**Round 4 — slice-parallel decode.** `decode_frame` now auto-dispatches
+multi-slice frames whose pixel count crosses
+`PARALLEL_PIXEL_THRESHOLD` (64 Ki px ≈ 320×200) onto a
+`std::thread::scope` pool sized at
+`min(num_slices, available_parallelism())`. Slice-level parallelism
+is what `spec/02` §7 names explicitly: each slice carries its own
+self-contained Huffman bit-stream (`spec/02` §5) and its predictor
+state restarts at the per-slice `+128` seed (`spec/04` §§3.1, 4, 5,
+7), so the slices fan out without inter-slice synchronisation.
+Measured 320×240 → 1280×720 ULY4 8-slice decode (gradient): serial
+1.44 → 8.95 ms, parallel 0.50 → 1.59 ms, **2.87× → 5.63× speedup**
+on an 8-core host. Explicit `decode_frame_serial` /
+`decode_frame_parallel` entry points are kept for latency-sensitive
+or threadpool-controlled callers. 80 tests = 52 unit + 16 round-2
+matrix + 6 round-3 LUT probes + 6 round-4 parallel-correctness
+probes.
+
+**Round 3 — LUT-accelerated Huffman decode.** Decoder caches a
 12-bit prefix LUT per plane (`2^12 = 4096` entries × 4 B) and
 resolves the common-case Huffman code in one shift+load; codes
 longer than 12 bits (max observed in the spec corpus is 16) fall
 back to the existing length-tier prefix scan. `BitReader::peek_bits`
 also rewritten to combine adjacent 32-bit LE words into a 64-bit
-register, dropping the prior `O(n)` bit-by-bit byte read. Bit-for-bit
-output identical to round 1 against every existing test
-(74 tests = 52 unit + 16 round-2 pattern matrix + 6 round-3
-high-entropy / mandelbrot probes).
+register, dropping the prior `O(n)` bit-by-bit byte read.
 
 **Round 1 + 2 — clean-room rebuild.** Implements the five 8-bit
 classic-family FourCCs (`ULRG` / `ULRA` / `ULY0` / `ULY2` / `ULY4`)
