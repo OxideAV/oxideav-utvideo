@@ -8,6 +8,56 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 6 — FFmpeg-pinned extradata builder + content-fixture corpus.**
+  New [`Extradata::ffmpeg_for(fourcc, num_slices)`] builder produces the
+  16-byte extradata block FFmpeg 7.1.2's `utvideo` encoder writes for
+  every FOURCC at every slice count `1..=256`, byte-identical to
+  `spec/01` §5 test-set `T1`. New [`Fourcc::ffmpeg_source_format_tag`]
+  accessor exposes the per-FOURCC 4-byte tag (`"YV12"` / `"YUY2"` /
+  `"YV24"` / `00 00 01 18` / `00 00 02 18`) without forcing the caller
+  to construct an Extradata. Together these close
+  [`audit/00-report.md`](../../docs/video/utvideo/audit/00-report.md)
+  §5.2 implementer-resolvable open items 1 (encoder-version: mirror
+  FFmpeg's `0x0100_00f0`) and 2 (RGB source-format tag: mirror
+  FFmpeg's `00 00 01 18` / `00 00 02 18`).
+
+  New content-fixture corpus (`tests/round6_content_fixtures.rs`)
+  exercises eight content-style synthetic patterns (solid, horizontal
+  gradient, diagonal gradient, vertical stripes 4-wide, horizontal
+  stripes 4-tall, 8×8 binary checker, LCG noise, sparse impulses) ×
+  four predictors × five FOURCCs at 128×96, plus a 16-cell 256×192
+  8-slice smoke pass and a four-cell compressed-size headline
+  measurement. Beyond the existing round-2 self-roundtrip equality,
+  round-6 introduces **compressed-size bounds** as audit/01 §8 item 4
+  ("wider slice-count and resolution corpus … compressed size within
+  X% of FFmpeg") recommended:
+
+  - **Universal upper bound** on every cell: `8 bits/sample ×
+    total_samples + per-plane overhead`, with 10% slack. Catches an
+    encoder regression that drops back to flat 8-bit-per-pixel.
+  - **Solid pattern exact-bound**: `3 * (256 + 4 * num_slices) + 4`
+    bytes (single-symbol Huffman per plane → zero slice-data bytes
+    per `spec/02` §5.1). Locks down the single-symbol fast path.
+  - **Very-compressible bound** (`VerticalStripes`+`Left`,
+    `HorizontalStripes`+`Gradient`, `GradientX`+`Left`): ≤ 3
+    bits/sample.
+  - **Compression-quality ordering invariants**:
+    `Solid << GradientDiag/Gradient` (highly predictable << ~7-symbol
+    histogram) and `GradientDiag/Gradient * 2 < Noise/None` (well-
+    predicted signal half-or-less the unpredicted-noise size).
+
+  336-cell content matrix + 4-cell headline measurement is fully
+  byte-exact self-roundtripped; this is regression sentinel coverage
+  for any future predictor / Huffman / parallel-encode change.
+
+  Total test count: **100** = 61 unit (+9 from round 5) + 16 round-2
+  matrix + 6 round-3 LUT + 6 round-4 parallel-decode + 7 round-5
+  parallel-encode + **4 round-6 content fixtures**.
+
+  Wall: spec/00 + spec/01 + spec/02 + spec/04 + spec/05 (read-only) +
+  audit/00-report.md (read-only, for §5.2 + §8.4 directions only).
+  No reference-impl/python read; no external library source.
+
 - **Round 5 — slice-parallel encode.** Mirror of the round-4
   decoder fan-out. `encode_frame` now auto-dispatches multi-slice
   frames whose luma pixel count crosses

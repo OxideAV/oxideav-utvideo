@@ -5,6 +5,30 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 6 — FFmpeg-pinned extradata builder + content-fixture corpus.**
+New [`Extradata::ffmpeg_for(fourcc, num_slices)`] builder produces the
+16-byte extradata block FFmpeg 7.1.2's `utvideo` encoder writes — all
+five FOURCCs, all 1..256 slice counts, byte-identical to `spec/01` §5
+test-set `T1`. Closes audit/00-report.md §5.2 implementer-resolvable
+open items 1 (encoder-version semantics: mirror `0x0100_00f0`) and 2
+(RGB source-format tag: mirror `00 00 01 18` / `00 00 02 18`). New
+[`Fourcc::ffmpeg_source_format_tag`] accessor exposes the per-FOURCC
+4-byte tag. Round-6 also adds a deterministic 336-cell content-fixture
+corpus exercising eight content-style synthetic patterns (solid /
+horizontal-gradient / diagonal-gradient / vertical-stripes /
+horizontal-stripes / 8×8 checker / LCG noise / sparse impulses) ×
+4 predictors × 5 FOURCCs at 128×96 + a 16-cell 256×192 8-slice smoke
+pass, with **compressed-size bounds**: universal `8 bits/sample`
+ceiling on every cell, exact `3*(256 + 4*num_slices) + 4 = 784` byte
+equality on the Solid pattern (single-symbol Huffman per plane), and
+ordering invariants (`Solid << GradientDiag/Gradient << Noise/None`).
+**100 tests = 61 unit + 16 round-2 matrix + 6 round-3 LUT + 6 round-4
+parallel-decode + 7 round-5 parallel-encode + 4 round-6 content
+fixtures**, up from 87 in round 5 (+13 tests).
+Workspace-README headline estimate: **decode ~97% / encode ~96%**
+(was decode 95% / encode 94%) — the +2/+2 reflects the FFmpeg
+extradata-level interop closure and the broader corpus.
+
 **Round 5 — slice-parallel encode.** `encode_frame` now auto-dispatches
 multi-slice frames whose pixel count crosses
 `encoder::PARALLEL_PIXEL_THRESHOLD` (64 Ki px ≈ 320×200) onto a
