@@ -8,6 +8,41 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 7 — encoder byte-stability (idempotency) + full slice-count
+  boundary sweep.** New `tests/round7_idempotency.rs` adds the two
+  *byte*-level encoder invariants no prior round asserted (every
+  earlier suite only checks the *pixel* round-trip `decode ∘ encode ==
+  identity`):
+
+  - **Deterministic, path-invariant encode.** `encode_frame` called
+    twice on one frame, and `encode_frame` / `encode_frame_serial` /
+    `encode_frame_parallel` on the same input, all emit byte-identical
+    chunk payloads — pinning the Huffman tie-break (length DESC, sym
+    DESC per `spec/05` §2.2) and the package-merge length build as
+    deterministic, and re-stating the round-5 parallel-encode
+    correctness guarantee as a byte equality rather than only a pixel
+    one. 20 cells (5 FOURCCs × 4 predictors) at 320×216/8-slice so the
+    auto-dispatch path actually selects the parallel branch.
+  - **Byte-stable transcode fixed point.** `encode ∘ decode ∘ encode`
+    reproduces the first encode's bytes exactly across 5 FOURCCs ×
+    4 predictors × 3 entropy regimes × 2 slice counts (120 cells) at a
+    non-divisible height (96×70). Strictly stronger than pixel
+    round-trip: a non-canonical Huffman build or scratch-state-
+    dependent slice partition would pass pixel round-trip but break
+    byte-stability.
+
+  Plus a **full `num_slices ∈ 1..=256` boundary sweep** at heights
+  deliberately chosen so `ph % N != 0` for most `N` and `N > ph` for
+  the tail (forcing uneven-row and zero-row slices, the latter
+  carrying zero slice-data bytes per `spec/02` §5.1) — ULY0 64×70,
+  ULY2 62×50, ULY4 24×45 (all four predictors), ULRG/ULRA 30×39 — each
+  cell round-trips and (for `N <= 64`) re-checks the byte-stable fixed
+  point. A focused edge test covers the exact `ph*(s+1)/N`
+  integer-division transition at `N ∈ {ph-1, ph, ph+1, ph+7}`. All
+  behaviour derived from `docs/video/utvideo/spec/`; the xorshift64*
+  content source is a self-contained PRNG with no codec provenance.
+  **107 tests** (+7), all green.
+
 - **Round 6 — FFmpeg-pinned extradata builder + content-fixture corpus.**
   New [`Extradata::ffmpeg_for(fourcc, num_slices)`] builder produces the
   16-byte extradata block FFmpeg 7.1.2's `utvideo` encoder writes for

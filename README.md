@@ -5,6 +5,26 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 7 — encoder byte-stability (idempotency) + full slice-count
+boundary sweep.** New `tests/round7_idempotency.rs` adds the *byte*-level
+encoder invariants no prior round asserted (earlier suites check only
+the *pixel* round-trip `decode ∘ encode == identity`): (1) `encode_frame`
+is **deterministic and path-invariant** — two calls, and the serial /
+parallel / auto-dispatch entry points, all emit byte-identical payloads,
+pinning the Huffman tie-break (`spec/05` §2.2) and re-stating round-5
+parallel-encode correctness as a byte equality; (2) `encode ∘ decode ∘
+encode` is a **byte-stable transcode fixed point** (5 FOURCCs ×
+4 predictors × 3 entropy regimes × 2 slice counts at a non-divisible
+96×70), strictly stronger than pixel round-trip. Plus a **full
+`num_slices ∈ 1..=256` sweep** at heights chosen so `ph % N != 0` for
+most `N` and `N > ph` for the tail — exercising uneven-row and zero-row
+slices (zero slice-data bytes per `spec/02` §5.1) across all five FOURCCs
+and four predictors, with an edge test at the `ph*(s+1)/N`
+integer-division transition. **107 tests** (was 100, +7). Headline
+estimate unchanged at **decode ~97% / encode ~96%** — round 7 hardens
+the existing encode/decode surface rather than extending capability;
+ULH*/HBD/Lite/interlaced remain blocked on out-of-corpus docs.
+
 **Round 6 — FFmpeg-pinned extradata builder + content-fixture corpus.**
 New [`Extradata::ffmpeg_for(fourcc, num_slices)`] builder produces the
 16-byte extradata block FFmpeg 7.1.2's `utvideo` encoder writes — all
