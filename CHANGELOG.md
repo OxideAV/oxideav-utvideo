@@ -8,6 +8,57 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 8 — malformed-payload decode robustness (negative tests).**
+  New `tests/round8_malformed_decode.rs` (11 tests) pins the decoder's
+  defensive surface. Every prior round (1..7) exercises only the happy
+  decode path (a frame the in-crate encoder produced, fed back through
+  `decode_frame`); the `Err(...)` arms in `decoder::parse_payload` +
+  `huffman::decode_slice` had a single smoke test
+  (`round4_parallel_decode.rs` truncates 8 bytes and asserts
+  `is_err()`) and **none asserted the specific `Error` variant**. For
+  each malformed-payload condition the spec names, the suite starts
+  from a valid encoder output and surgically mutates the wire bytes to
+  trip exactly one decoder guard:
+
+  - **`MissingFrameInfo`** — payload shorter than the trailing 4-byte
+    frame-info dword (`spec/02` §6); swept over lengths 0..4.
+  - **`ChunkTooShort`** at all three structural spans (`spec/02` §7):
+    the 256-byte Huffman descriptor (4- and 104-byte payloads), the
+    `num_slices × 4` offset table (4-slice frame, table truncated to 2
+    offsets), and the slice-data span (inflate plane 0's slice-end
+    offset past the present bytes). Plus a trailing-junk case (4 junk
+    bytes inserted before the frame-info dword break the
+    `offset == frame_info_off` exact-length invariant).
+  - **`NonMonotonicSliceOffsets`** — 2-slice frame whose second
+    slice-end offset is made strictly less than the first (`spec/02`
+    §5).
+  - **`SliceNotWordAligned`** — bump plane 0's slice-end offset by 1
+    (the encoder always emits a multiple of 4, so `+1` is guaranteed
+    non-aligned; `spec/05` §4.1).
+  - **`SliceTruncated` / `HuffmanDecodeFailure`** — zero plane 0's
+    entire slice-data span (bounded by reading the real slice-end
+    offset, so the corruption never bleeds into the next plane's
+    descriptor). The canonical table assigns the all-zero prefix to the
+    longest code (`spec/05` §2.2), so an all-zero stream emits the
+    max-length symbol every pixel and exhausts the bit budget before
+    256 pixels are produced.
+
+  Plus a **single-byte-flip sweep** over a real slice-data span
+  asserting the **no-panic / no-spurious-variant contract**: a flipped
+  bit either resyncs to a structurally complete frame (correct plane
+  count + sample lengths) or is rejected as `SliceTruncated` /
+  `HuffmanDecodeFailure` — never a panic, never an out-of-family error.
+  A positive control (`base_fixtures_decode_clean`) re-decodes the
+  unmutated base fixtures so a "passing" negative test can't hide a
+  pre-broken base frame.
+
+  All wire layout / error conditions derived from
+  `docs/video/utvideo/spec/02` + `docs/video/utvideo/spec/05`; the
+  xorshift64*-flavoured content source is a self-contained PRNG with no
+  codec provenance. **118 tests** (+11), all green. Headline estimate
+  unchanged at decode ~97% / encode ~96% — round 8 hardens the existing
+  decode surface (rejection paths) rather than extending capability.
+
 - **Round 7 — encoder byte-stability (idempotency) + full slice-count
   boundary sweep.** New `tests/round7_idempotency.rs` adds the two
   *byte*-level encoder invariants no prior round asserted (every

@@ -5,6 +5,34 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 8 — malformed-payload decode robustness (negative tests).**
+New `tests/round8_malformed_decode.rs` pins the decoder's defensive
+surface: every prior round exercises only the *happy* path
+(`decode ∘ encode == identity`), so the `Err(...)` arms in
+`decoder::parse_payload` + `huffman::decode_slice` had only one smoke
+test (`round4` truncates 8 bytes and asserts `is_err()`) and **none
+pinned the specific `Error` variant**. The new suite starts from a
+valid encoder output and surgically mutates the wire bytes to trip
+exactly one decoder guard, asserting the precise variant for each
+malformed-payload condition the spec names: `MissingFrameInfo`
+(payload `< 4` bytes, `spec/02` §6); `ChunkTooShort` at the descriptor,
+offset-table, and slice-data spans plus a trailing-junk case
+(`spec/02` §7); `NonMonotonicSliceOffsets` (`spec/02` §5);
+`SliceNotWordAligned` (`spec/05` §4.1 — bump a slice-end-offset by 1);
+and `SliceTruncated`/`HuffmanDecodeFailure` from zeroed entropy bits
+(all-zero stream → longest-code-per-pixel exhausts the bit budget).
+A full single-byte-flip sweep over a real slice-data span asserts the
+**no-panic / no-spurious-variant contract** (a corrupt bit either
+resyncs to a structurally complete frame or is rejected as one of the
+two slice-data variants — never a panic, never an out-of-family
+error), and a positive control re-decodes the unmutated base fixtures.
+**118 tests** (was 107, +11). This is the negative half of the decode
+contract — a corrupt `00dc` chunk is rejected with a diagnosable
+error, never silently mis-decoded. Headline estimate unchanged at
+**decode ~97% / encode ~96%**; round 8 hardens the existing decode
+surface rather than extending capability. ULH*/HBD/Lite/interlaced
+remain blocked on out-of-corpus docs.
+
 **Round 7 — encoder byte-stability (idempotency) + full slice-count
 boundary sweep.** New `tests/round7_idempotency.rs` adds the *byte*-level
 encoder invariants no prior round asserted (earlier suites check only
