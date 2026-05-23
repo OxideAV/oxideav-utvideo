@@ -8,6 +8,81 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 9 — descriptor-mutation rejection + encoder API misuse +
+  bit-pack/unpack invariants.** New
+  `tests/round9_descriptor_and_api_robustness.rs` (23 tests) extends
+  Round 8's negative-test surface along the dimensions Round 8
+  deliberately left untouched. Round 8 fuzzed the slice-data span,
+  pinning `SliceTruncated` / `HuffmanDecodeFailure`; it did **not** fuzz
+  the 256-byte Huffman descriptor (a different guard family — the
+  descriptor goes through `huffman::HuffmanTable::build`, not
+  `decode_slice`, and trips `KraftViolation` /
+  `MultipleSingleSymbolSentinels`). The other Round-8 omissions were
+  the encoder's input-validation surface (`EncoderPlaneSizeMismatch`,
+  `InvalidSliceCount`, `DimensionConstraint`) and the `BitWriter` /
+  `BitReader` pair tested in isolation (Round 1..8 always tested them
+  through a `HuffmanTable`).
+
+  - **Plane-0 descriptor mutations** (5 tests). Starting from a valid
+    encoded frame, mutate plane 0's 256-byte descriptor and confirm
+    `decode_frame` surfaces the correct variant:
+    - `MultipleSingleSymbolSentinels` when two distinct codelen-0
+      entries are injected (`spec/05` §6.1 — only one single-symbol
+      sentinel per plane).
+    - `KraftViolation` on three histograms: incomplete (one codelen-1
+      entry, Σ = 1/2), excess (three codelen-1, Σ = 3/2), and uniform
+      codelen-1 (256 × 2^-1 = 128).
+    - A full single-byte-flip sweep over the 256-byte descriptor
+      asserts the no-panic / no-spurious-variant contract: every flip
+      either decodes successfully (the residual stream happens to
+      match an alternate but Kraft-valid descriptor) or fails with one
+      of `KraftViolation`, `MultipleSingleSymbolSentinels`,
+      `SliceTruncated`, `HuffmanDecodeFailure` — never any other
+      variant, never a panic.
+
+  - **Encoder API rejection** (5 tests). `encode_frame` surfaces:
+    - `EncoderPlaneSizeMismatch` for wrong plane count (3 planes
+      passed to ULRA which needs 4) and for wrong per-plane buffer
+      length (ULY0 U-plane size 15 when 16 expected; the
+      offending-plane index + expected + got fields are pinned).
+    - `InvalidSliceCount` for `num_slices == 0` and `num_slices == 257`
+      (the wire formula caps at 256).
+    - `DimensionConstraint` for ULY0 with odd width (`spec/02` §3.2).
+
+  - **`Extradata::ffmpeg_for` boundary** (3 tests). Round 6 tested the
+    happy case; this adds the explicit rejection arms (0 slices and
+    257 slices → `InvalidSliceCount`) and the upper-bound success case
+    (256 slices → `flags` high byte = `0xff`, `num_slices() == 256`).
+
+  - **`StreamConfig::new` cascade** (3 tests). Zero width and zero
+    height surface `DimensionConstraint`; ULY2 with odd height is
+    accepted (it chroma-subsamples by width only).
+
+  - **`BitWriter` ⇄ `BitReader` round-trip invariants** (6 tests) in
+    isolation, without going through `HuffmanTable`. Every code length
+    `L ∈ 1..=32` round-trips exactly (200 codes per length × 32
+    lengths = 6400 round-trip pairs); the bit-pack byte length is the
+    exact multiple of 4 the spec mandates (`spec/05` §4.1); mixed-
+    length code sequences cover every bit-offset transition within a
+    32-bit word; `BitWriter::finish` on an empty writer returns an
+    empty `Vec` (the encoder relies on this for the single-symbol
+    zero-slice-data fast path, `spec/02` §5.1); a 33-bit write
+    zero-pads the trailing partial word (`spec/05` §4.3);
+    `BitReader::has_bits` at end-of-stream rejects `n > 0` and accepts
+    `n == 0`; `BitReader::peek_bits` straddling a 32-bit-word boundary
+    returns the expected MSB-first concatenation (4-bit codes 0xa, 0xb
+    at positions [30..38] split across the first two words).
+
+  Plus a `base_fixture_decodes_clean` positive control so an encoder
+  regression surfaces here rather than masquerading as "everything in
+  the suite mysteriously errors". All behaviour derived from
+  `docs/video/utvideo/spec/02` + `docs/video/utvideo/spec/05`; the
+  xorshift64*-flavoured PRNG is self-contained with no codec
+  provenance. **141 tests** (+23), all green. Headline estimate
+  unchanged at decode ~97% / encode ~96% — round 9 hardens the
+  existing decode + encode surface (rejection paths +
+  bit-pack/unpack invariants) rather than extending capability.
+
 - **Round 8 — malformed-payload decode robustness (negative tests).**
   New `tests/round8_malformed_decode.rs` (11 tests) pins the decoder's
   defensive surface. Every prior round (1..7) exercises only the happy

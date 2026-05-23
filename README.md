@@ -5,6 +5,39 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 9 — descriptor-mutation rejection + encoder API misuse +
+bit-pack/unpack invariants.** New `tests/round9_descriptor_and_api_robustness.rs`
+extends Round 8's negative-test surface in three directions left
+untested. (1) **Plane-0 256-byte Huffman descriptor mutations**: Round 8
+covered slice-data byte-flips but deliberately left the descriptor span
+alone (different guard family — `huffman::HuffmanTable::build` raises
+`KraftViolation` and `MultipleSingleSymbolSentinels` rather than
+`SliceTruncated` / `HuffmanDecodeFailure`). The new suite pins the
+integration path: a real encoded frame whose plane-0 descriptor is
+mutated trips `MultipleSingleSymbolSentinels` (two zero-codelen
+sentinels), `KraftViolation` on incomplete (Σ < 1), excess (Σ > 1), and
+uniform-codelen-1 (Σ = 128) descriptors; plus a full single-byte-flip
+sweep over the 256-byte descriptor span asserts the no-panic /
+no-spurious-variant contract. (2) **Encoder API rejection**:
+`encode_frame` surfaces `EncoderPlaneSizeMismatch` (wrong plane count
+for ULRA, wrong per-plane buffer length on ULY0), `InvalidSliceCount`
+(`num_slices == 0` and `> 256`), and `DimensionConstraint` (odd ULY0
+width) — all integration-tested for the first time. (3) **Public-API
+boundary checks**: `Extradata::ffmpeg_for` rejects 0 and 257 slices
+with `InvalidSliceCount` and accepts 256 (the maximum, `flags` high
+byte = `0xff`); `StreamConfig::new` rejects zero width / height. Plus
+**`BitWriter` ⇄ `BitReader` round-trip invariant** sweep in isolation
+(without going through `HuffmanTable`): every code length `L ∈ 1..=32`
+× 200 codes round-trips exactly, with byte-aligned padding to 32-bit
+words (`spec/05` §4.1); mixed-length code sequences cover every
+bit-offset transition within a 32-bit word; `peek_bits` straddling a
+word boundary returns the expected MSB-first concatenation. **141
+tests** (was 118, +23). Headline estimate unchanged at **decode ~97% /
+encode ~96%** — round 9 hardens the existing decode + encode surface
+(rejection paths + bit-pack/unpack invariants) rather than extending
+capability. ULH*/HBD/Lite/interlaced remain blocked on out-of-corpus
+docs.
+
 **Round 8 — malformed-payload decode robustness (negative tests).**
 New `tests/round8_malformed_decode.rs` pins the decoder's defensive
 surface: every prior round exercises only the *happy* path
