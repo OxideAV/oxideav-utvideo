@@ -5,6 +5,26 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 10 — cargo-fuzz decode harness.** The encoder is feature-complete
+for all five FourCCs × four predictors (None/Left/Gradient/Median) with
+RGB inter-plane decorrelation, multi-slice, and a slice-parallel path —
+the self-roundtrip suite already pins `decode ∘ encode == identity` across
+the entire 5×4 matrix, so this round adds a continuous-fuzzing harness on
+the decoder (the attacker-facing surface) instead of new capability. New
+`fuzz/` cargo-fuzz crate with a `decode_utvideo` target: it synthesises a
+small `StreamConfig` (FourCC + ≤64×64 even dims + 1..=16 slices) from a
+4-byte header prefix of the input and feeds the remainder to
+`decode_frame`, asserting the call always *returns* a `Result` —
+never panics / aborts / OOMs — for arbitrary chunk-payload bytes.
+Dimensions are capped so the budget lands on genuine parser defects
+(descriptor / offset-table index math, slice-range arithmetic, the
+Huffman bit reader) rather than format-legitimate large allocations.
+Local run: **21.8M executions in 61 s, 0 crashes, RSS flat at ~419 MB**,
+458 edges covered. A daily scheduled `Fuzz` workflow gives the target the
+full 30-minute budget. Headline estimate unchanged at **decode ~97% /
+encode ~96%**. ULH*/HBD/Lite/interlaced remain blocked on out-of-corpus
+docs.
+
 **Round 9 — descriptor-mutation rejection + encoder API misuse +
 bit-pack/unpack invariants.** New `tests/round9_descriptor_and_api_robustness.rs`
 extends Round 8's negative-test surface in three directions left

@@ -1,0 +1,39 @@
+[package]
+name = "oxideav-utvideo-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Ut Video's decoder is the attack surface worth fuzzing: it parses an
+# attacker-controlled chunk payload (256-byte Huffman descriptor +
+# slice-end-offset table + slice data + trailing frame-info) against a
+# StreamConfig whose width/height/slice-count drive every allocation
+# and loop bound. The clean-room wall bars any reference codec source as
+# a cross-decode oracle, so this fuzz crate is **decode-only**: it
+# synthesises a StreamConfig from a small header prefix of the fuzz
+# input, feeds the remainder to `decode_frame`, and asserts the call
+# always returns a `Result` rather than panicking / aborting / OOMing.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-utvideo]
+path = ".."
+# The registry feature pulls in oxideav-core; the decoder under test
+# needs none of it, so build the leanest possible harness.
+default-features = false
+
+# Prevent this from interfering with the umbrella workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode_utvideo"
+path = "fuzz_targets/decode_utvideo.rs"
+test = false
+doc = false

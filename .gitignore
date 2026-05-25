@@ -1,5 +1,7 @@
 /target
 
-# Rust build lockfile — this crate is a library, so we do
-# not commit Cargo.lock. See https://doc.rust-lang.org/cargo/faq.html#why-do-binaries-have-cargolock-in-version-control-but-not-libraries
-Cargo.lock
+# Rust build lockfile — this crate is a library, so we do not commit its
+# Cargo.lock. See https://doc.rust-lang.org/cargo/faq.html#why-do-binaries-have-cargolock-in-version-control-but-not-libraries
+# Anchored to the crate root so the cargo-fuzz binary crate under fuzz/
+# (a `publish = false` binary, which *does* pin its lockfile) is exempt.
+/Cargo.lock
