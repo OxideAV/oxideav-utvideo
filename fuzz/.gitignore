@@ -1,5 +1,13 @@
 target
 artifacts
 coverage
-corpus
 *.log
+
+# Default: ignore everything under fuzz/corpus/ — libFuzzer self-grows
+# the decoder corpus from arbitrary bytes (~22M execs in 60 s) and
+# committed seeds would only be reflections of that growth.
+/corpus/*
+# Whitelist the encoder fuzz target's seed corpus. Round 12 ships a
+# small hand-picked seed set so a fresh
+# `cargo fuzz run encode_utvideo_frame` doesn't start cold.
+!/corpus/encode_utvideo_frame/

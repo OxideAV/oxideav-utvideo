@@ -8,6 +8,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 12 — second cargo-fuzz target: encode-then-decode roundtrip.**
+  Round 10 added the `decode_utvideo` target covering the attacker-facing
+  surface (arbitrary bytes → `decode_frame`); the encoder is a different
+  shape of risk (typed input, caller-driven), and on top of that the
+  encoder/decoder pair must round-trip bit-exactly or the self-roundtrip
+  invariant the round-1 tests pin on hand-picked fixtures silently
+  regresses on some other shape. This round adds **`encode_utvideo_frame`**
+  (registered explicitly in `fuzz/Cargo.toml` — no reusable-workflow
+  auto-discovery dependency) that drives
+  `(fourcc × dims ≤ 32×32 × predictor × num_slices × pixels)` through
+  `encode_frame` → `decode_frame` and asserts every plane survives the
+  roundtrip bit-exactly. The 32×32 dim cap keeps the fuzzer's budget
+  on encoder/decoder logic (Huffman length builder, slice-range
+  arithmetic, RGB decorrelate, bit-pack/unpack symmetry) rather than
+  the trivial "allocate 4 GiB" branch the format's syntax allows.
+  A **stable-CI mirror** at `tests/fuzz_seed_corpus_encode.rs` (11
+  tests, mirroring the r160 h261 RTCP-fuzz pattern verbatim) runs the
+  same driver logic against the committed seed corpus + a handful of
+  inline adversarial buffers (empty input, 5-byte-only header,
+  all-ones, deterministic-random, every FourCC × Left, every predictor
+  × ULY2, slice-count-above-height, 32×32 ULY4 upper bound, ULRA
+  4-plane alpha) so a regressed encoder or an encoder/decoder skew
+  trips the regular CI matrix instead of waiting for the next daily
+  fuzz run to notice. 8 committed seeds under
+  `fuzz/corpus/encode_utvideo_frame/` cover the 5 FourCCs × 4
+  predictors × single/multi-slice cross-product at small dims.
+  No new public API. Headline estimate unchanged at decode ~97% /
+  encode ~96%; this round is depth-mode robustness coverage, not new
+  capability.
+
 - **Round 11 — criterion benchmarks for the decode + encode hot paths.**
   The crate is saturated on the classic-family wire (decode ~97% /
   encode ~96%) with a daily fuzz harness in place; this round adds a

@@ -5,6 +5,32 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 12 — second cargo-fuzz target: encode-then-decode roundtrip.**
+The decoder fuzz harness from round 10 covers the attacker-facing surface
+(arbitrary bytes through `decode_frame`). The encoder is a different
+shape of risk — its input is a typed `EncodedFrame` (FourCC + dims +
+predictor + slice count + per-plane samples) but a caller that mis-sizes
+a plane buffer or picks a slice count larger than any row is a real
+integration bug to handle without panicking, and on top of that the
+encoder's own decoder MUST round-trip its bytes bit-exactly or the
+self-roundtrip invariant the round-1 tests pin on hand-picked fixtures
+silently regresses on some other shape. This round adds a second
+target, **`encode_utvideo_frame`**, that drives `(fourcc × dims ≤ 32×32
+× predictor × num_slices × pixels)` through `encode_frame` → `decode_frame`
+and asserts every plane survives the roundtrip bit-exactly. A
+**stable-CI mirror** at `tests/fuzz_seed_corpus_encode.rs` (11 tests,
+mirroring the r160 h261 RTCP-fuzz pattern verbatim) runs the same
+driver logic against the committed seed corpus + a handful of inline
+adversarial buffers (empty input, 5-byte-only header, all-ones, every
+FourCC × Left, every predictor × ULY2, slice-count > height, 32×32 ULY4
+upper bound, ULRA 4-plane alpha) so a regressed encoder or an
+encoder/decoder skew trips the regular CI matrix instead of waiting for
+the next daily fuzz run to notice. 8 committed seeds under
+`fuzz/corpus/encode_utvideo_frame/` cover the 5 FourCCs × 4 predictors
+× single/multi-slice cross-product at small dims. Headline estimate
+unchanged at **decode ~97% / encode ~96%**; this round is depth-mode
+robustness coverage, not new capability.
+
 **Round 11 — criterion benchmarks for decode + encode + Huffman LUT +
 RGB decorrelate.** The crate is decoder/encoder feature-complete on the
 classic-family wire and saturated against the spec corpus (decode ~97% /

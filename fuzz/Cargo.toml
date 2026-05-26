@@ -12,17 +12,29 @@ cargo-fuzz = true
 # slice-end-offset table + slice data + trailing frame-info) against a
 # StreamConfig whose width/height/slice-count drive every allocation
 # and loop bound. The clean-room wall bars any reference codec source as
-# a cross-decode oracle, so this fuzz crate is **decode-only**: it
+# a cross-decode oracle, so the decoder target is **decode-only**: it
 # synthesises a StreamConfig from a small header prefix of the fuzz
 # input, feeds the remainder to `decode_frame`, and asserts the call
 # always returns a `Result` rather than panicking / aborting / OOMing.
+#
+# The encoder is a different shape of risk: its input is a typed
+# `EncodedFrame` (FourCC + dims + predictor + slice-count + per-plane
+# samples) rather than a raw byte stream, and a caller that mis-sizes a
+# plane buffer or picks a slice count larger than any row is a real
+# integration bug to handle without panicking. On top of that, the
+# encoder's own decoder MUST round-trip its bytes bit-exactly — the
+# `encode_utvideo_frame` target therefore (a) calls `encode_frame`,
+# (b) calls `decode_frame` against the encoded bytes, and (c) asserts
+# every plane's samples survive the roundtrip — so any
+# encode/decode skew surfaces as a panic instead of as a silent
+# correctness regression.
 [dependencies]
 libfuzzer-sys = "0.4"
 
 [dependencies.oxideav-utvideo]
 path = ".."
-# The registry feature pulls in oxideav-core; the decoder under test
-# needs none of it, so build the leanest possible harness.
+# The registry feature pulls in oxideav-core; the targets under test
+# need none of it, so build the leanest possible harness.
 default-features = false
 
 # Prevent this from interfering with the umbrella workspace.
@@ -35,5 +47,15 @@ debug = 1
 [[bin]]
 name = "decode_utvideo"
 path = "fuzz_targets/decode_utvideo.rs"
+test = false
+doc = false
+
+# Second fuzz target — encode + immediate-decode roundtrip. See the
+# crate-level note above for the rationale (encoder input is typed but
+# still attacker-shaped, and the encoder/decoder pair must round-trip
+# bit-exactly).
+[[bin]]
+name = "encode_utvideo_frame"
+path = "fuzz_targets/encode_utvideo_frame.rs"
 test = false
 doc = false
