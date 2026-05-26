@@ -8,6 +8,69 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 11 — criterion benchmarks for the decode + encode hot paths.**
+  The crate is saturated on the classic-family wire (decode ~97% /
+  encode ~96%) with a daily fuzz harness in place; this round adds a
+  baseline criterion bench suite so future optimisation work has a
+  before/after measurement target.
+
+  - `benches/decode.rs` (3 bench groups). Full-frame ULRG decode at
+    1920×1080 single-slice (`decode_ulrg_1080p_single`); same at
+    ULY2 1920×1080 (`decode_uly2_1080p_single`); and a
+    `bench_with_input` scaling table at 1280×720 ULY4 with
+    `N ∈ {1, 2, 4, 8}` slices covering both `decode_frame_serial`
+    and `decode_frame_parallel` so the slice-parallel speedup is one
+    chart row in criterion's output.
+  - `benches/encode.rs` (3 bench groups). Symmetric coverage on
+    `encode_frame` — ULRG / ULY2 1080p single-slice plus the
+    `N ∈ {1, 2, 4, 8}` slice-parallel scaling at 1280×720 ULY4. The
+    encoder's Amdahl-bounded ceiling (per-plane Huffman length build
+    stays single-threaded by construction — the parallel slices share
+    one codebook) is visible in the curve.
+  - `benches/huffman_lut.rs` (2 bench groups). Isolated
+    `HuffmanTable::decode_slice` microbench. `huffman_lut_pure_max12`
+    builds a descriptor with `max_len = LUT_BITS = 12` so every code
+    resolves on the round-3 LUT fast path; `huffman_lut_fallback_max14`
+    uses `max_len = 14` so the top two tiers fall through to the
+    slow-path length-tier binary search (the realistic high-entropy
+    regime per `spec/02` §4.2). `bench_with_input` over
+    `n_pixels ∈ {4096, 16384, 65536, 262144}` shows linear scaling and
+    pins per-symbol decode rate.
+  - `benches/rgb_decorrelate.rs` (2 bench groups). Microbench for the
+    `predict::forward_decorrelate_rgb` / `inverse_decorrelate_rgb`
+    primitives (`spec/04` §6 — the ULRG / ULRA inter-plane
+    `B' = B - G + 128` / `R' = R - G + 128` and inverse transforms).
+    `bench_with_input` over `n_samples ∈ {64K, 256K, 1M, 1920×1080}`
+    pins the per-byte kernel rate.
+
+  Measured median wall-clock on an 8-core host (release profile):
+
+  | Bench                                       | Time      | Throughput     |
+  | ------------------------------------------- | --------- | -------------- |
+  | `decode_ulrg_1080p_single` (Gradient)       | 40.56 ms  | 146 MiB/s      |
+  | `decode_uly2_1080p_single` (Gradient)       | 26.65 ms  | 148 MiB/s      |
+  | `decode_parallel_scaling/serial/8`          | 17.67 ms  | 149 MiB/s      |
+  | `decode_parallel_scaling/parallel/8`        |  2.67 ms  | 987 MiB/s      |
+  | `encode_ulrg_1080p_single` (Gradient)       | 37.00 ms  | 160 MiB/s      |
+  | `encode_uly2_1080p_single` (Gradient)       | 24.07 ms  | 164 MiB/s      |
+  | `encode_parallel_scaling/parallel/8`        |  ~3 ms    | ~875 MiB/s     |
+  | `huffman_lut_pure_max12/262144`             |  1.02 ms  | 257 Melem/s    |
+  | `huffman_lut_fallback_max14/262144`         |  1.32 ms  | 199 Melem/s    |
+  | `rgb_inverse_decorrelate/2073600`           | 73.8 µs   | 26.2 GiB/s     |
+  | `rgb_forward_decorrelate/2073600`           | 76.7 µs   | 25.2 GiB/s     |
+
+  The 8-slice parallel-decode speedup at 1280×720 lands at ~6.7× over
+  the 1-slice serial baseline (was ~5.6× per the round-4 hand-timed
+  perf-smoke; the criterion methodology with batched iterations and
+  warm cache narrows the noise floor). The LUT fast-path is ~22%
+  faster than the fallback search at the largest input. All inputs
+  are synthesised on-the-fly from a deterministic xorshift32 PRNG;
+  no committed binary fixtures.
+
+  Headline estimate unchanged at **decode ~97% / encode ~96%** — round
+  11 is depth-mode benchmark coverage, not new capability.
+  ULH*/HBD/Lite/interlaced remain blocked on out-of-corpus docs.
+
 - **Round 9 — descriptor-mutation rejection + encoder API misuse +
   bit-pack/unpack invariants.** New
   `tests/round9_descriptor_and_api_robustness.rs` (23 tests) extends

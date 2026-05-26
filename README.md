@@ -5,6 +5,55 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 11 — criterion benchmarks for decode + encode + Huffman LUT +
+RGB decorrelate.** The crate is decoder/encoder feature-complete on the
+classic-family wire and saturated against the spec corpus (decode ~97% /
+encode ~96% — round 10 added a daily 30-minute decode fuzz harness and
+round 9 the descriptor / API-misuse rejection sweep). This round adds
+criterion benchmarks so future optimisation work has a baseline:
+
+- `benches/decode.rs` — full-frame ULRG and ULY2 decode at 1920×1080
+  single-slice, plus a `bench_with_input` slice-parallel scaling table
+  at 1280×720 ULY4 with `N ∈ {1, 2, 4, 8}` covering both
+  `decode_frame_serial` and `decode_frame_parallel`.
+- `benches/encode.rs` — symmetric coverage on `encode_frame` (ULRG /
+  ULY2 1080p single-slice + 720p ULY4 slice-parallel scaling). The
+  encoder's Amdahl-bounded ceiling (per-plane Huffman length build is
+  single-threaded by construction) shows in the scaling curve.
+- `benches/huffman_lut.rs` — `HuffmanTable::decode_slice` microbench
+  isolating the round-3 12-bit-prefix LUT kernel. Two regimes:
+  `max_len = 12` (pure LUT fast-path) and `max_len = 14` (top two
+  tiers fall through to the slow-path length-tier scan).
+- `benches/rgb_decorrelate.rs` — microbench for
+  `predict::{forward,inverse}_decorrelate_rgb` (`spec/04` §6) across
+  `n_samples ∈ {64K, 256K, 1M, 1920×1080}`.
+
+Measured wall-clock on this 8-core host (release profile; criterion
+median of 10 samples):
+
+| Bench                                       | Time      | Throughput     |
+| ------------------------------------------- | --------- | -------------- |
+| `decode_ulrg_1080p_single` (Gradient)       | 40.56 ms  | 146 MiB/s      |
+| `decode_uly2_1080p_single` (Gradient)       | 26.65 ms  | 148 MiB/s      |
+| `decode_parallel_scaling/serial/1`          | 17.78 ms  | 148 MiB/s      |
+| `decode_parallel_scaling/parallel/8`        |  2.67 ms  | 987 MiB/s      |
+| `encode_ulrg_1080p_single` (Gradient)       | 37.00 ms  | 160 MiB/s      |
+| `encode_uly2_1080p_single` (Gradient)       | 24.07 ms  | 164 MiB/s      |
+| `encode_parallel_scaling/serial/1`          | 15.98 ms  | 165 MiB/s      |
+| `encode_parallel_scaling/parallel/8`        |  ~3 ms    | ~875 MiB/s     |
+| `huffman_lut_pure_max12/262144`             |  1.02 ms  | 257 Melem/s    |
+| `huffman_lut_fallback_max14/262144`         |  1.32 ms  | 199 Melem/s    |
+| `rgb_inverse_decorrelate/2073600`           | 73.8 µs   | 26.2 GiB/s     |
+| `rgb_forward_decorrelate/2073600`           | 76.7 µs   | 25.2 GiB/s     |
+
+The parallel-decode speedup at `N = 8` is ~6.7× over the same-frame
+serial baseline (was ~5.6× in the round-4 hand-timed perf-smoke), and
+the LUT fast-path adds ~22% over the fallback search at the largest
+input. All inputs are synthesised on-the-fly from a deterministic
+xorshift32 — no committed binary fixtures. Headline estimate unchanged
+at **decode ~97% / encode ~96%**; this round is depth-mode benchmark
+coverage, not new capability.
+
 **Round 10 — cargo-fuzz decode harness.** The encoder is feature-complete
 for all five FourCCs × four predictors (None/Left/Gradient/Median) with
 RGB inter-plane decorrelation, multi-slice, and a slice-parallel path —
