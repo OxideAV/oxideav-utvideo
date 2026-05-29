@@ -56,7 +56,7 @@ mod roundtrip_tests;
 
 pub use crate::decoder::{decode_frame, DecodedFrame, DecodedPlane, PlaneLabel};
 pub use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
-pub use crate::error::{Error, Result};
+pub use crate::error::{Error, ErrorCategory, Result};
 pub use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 
 // Framework integration — only when the `registry` feature is on.

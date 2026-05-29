@@ -8,6 +8,75 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 13 — `ErrorCategory` classifier + exhaustive `Display`
+  regression suite.** The 18-variant [`Error`] surface had no
+  structured taxonomy: callers either pattern-matched every variant
+  (brittle: a new variant added in a future round silently fell
+  through at the call site) or relied on the `Display` text. Round
+  13 adds an [`ErrorCategory`] enum with four buckets
+  (`MalformedStream` / `ApiMisuse` / `Unsupported` / `StreamShape`),
+  a `category()` accessor on `Error`, and four convenience predicates
+  (`is_malformed_stream` / `is_api_misuse` / `is_unsupported` /
+  `is_stream_shape`).
+
+  - **`MalformedStream`** (8 variants): per-frame wire bytes don't
+    match `docs/video/utvideo/spec/02` + `spec/05`. `ChunkTooShort`,
+    `NonMonotonicSliceOffsets`, `SliceNotWordAligned`,
+    `KraftViolation`, `MultipleSingleSymbolSentinels`,
+    `HuffmanDecodeFailure`, `SliceTruncated`, `MissingFrameInfo`.
+    A muxer-level caller MAY skip the offending packet and resync.
+  - **`ApiMisuse`** (3 variants): caller violated the typed
+    contract. `InvalidSliceCount`, `EncoderPlaneSizeMismatch`,
+    `InvalidInput`. Programming bug, not corrupt wire data.
+  - **`Unsupported`** (3 variants): structurally valid wire on a
+    code path this build doesn't implement. `HuffmanBitClear`
+    (raw-slice mode), `InterlacedNotSupported`,
+    `UnsupportedPrediction`. Bounded out-of-corpus paths per
+    `audit/00-report.md` §5.2.
+  - **`StreamShape`** (4 variants): stream-level identification
+    metadata malformed. `UnknownFourcc`, `ExtradataTruncated`,
+    `InvalidFrameInfoSize`, `DimensionConstraint`. A demuxer should
+    reject the stream, not retry per-frame.
+
+  The classifier `match` in `error.rs` has no `_ =>` fallback by
+  design: adding a new `Error` variant requires extending the
+  category mapping in the same commit. `ErrorCategory` is
+  `#[non_exhaustive]` so a fifth category in a future round is a
+  non-breaking change.
+
+  Plus a Round-1 message-accuracy fix: `Error::InvalidSliceCount`
+  Display previously read `"num_slices == 0"`, but the variant is
+  also produced for `num_slices > 256` (encoder, `Extradata::ffmpeg_for`,
+  decoder). The new message names the full valid range:
+  `"num_slices out of range (must be 1..=256 per spec/01 §4.4.3)"`.
+  A regression test pins both the new message form and the absence
+  of the stale `"== 0"` substring.
+
+  New `tests/round13_error_taxonomy.rs` (22 tests):
+  - **Display invariants** (15 tests): every variant's Display starts
+    with the `"oxideav-utvideo:"` crate-name prefix and is non-empty;
+    variant payload fields (FourCC hex bytes, byte counts, bit
+    positions, plane indices, inner `&'static str` messages) all
+    surface in the formatted output.
+  - **Category mapping** (5 tests): each of the four categories has
+    its variant list pinned to its [`ErrorCategory`] mapping; an
+    `every_variant_belongs_to_exactly_one_category` partition test
+    cross-checks that the four `is_*` predicates mutually exclude
+    (exactly one returns `true` for every value); a
+    `category_count_matches_variant_count` gate asserts the fixture
+    list length is 18 (drift trips a clear assertion).
+  - **`std::error::Error::source`** (1 test): every variant returns
+    `None`. The crate has no wrapped third-party errors; future
+    inadvertent wrapping trips this test.
+  - **`ErrorCategory` derives usable** (1 test): `Copy` + `PartialEq`
+    + `Eq` + `Hash` + `Debug` are all reachable downstream
+    (`HashSet<ErrorCategory>` membership confirmed).
+
+  **174 tests** (was 152, +22). No new public API surface beyond the
+  classifier; no spec change; no wire-format change. Headline
+  estimate unchanged at decode ~97% / encode ~96% — round 13 hardens
+  the public error-handling contract, not the codec capability.
+
 - **Round 12 — second cargo-fuzz target: encode-then-decode roundtrip.**
   Round 10 added the `decode_utvideo` target covering the attacker-facing
   surface (arbitrary bytes → `decode_frame`); the encoder is a different

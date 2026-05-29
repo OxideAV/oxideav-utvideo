@@ -123,7 +123,9 @@ impl core::fmt::Display for Error {
             Error::InterlacedNotSupported => {
                 f.write_str("oxideav-utvideo: extradata interlaced bit set (round 1 unsupported)")
             }
-            Error::InvalidSliceCount => f.write_str("oxideav-utvideo: num_slices == 0"),
+            Error::InvalidSliceCount => f.write_str(
+                "oxideav-utvideo: num_slices out of range (must be 1..=256 per spec/01 §4.4.3)",
+            ),
             Error::ChunkTooShort {
                 offset,
                 needed,
@@ -184,3 +186,138 @@ impl std::error::Error for Error {}
 
 /// Crate-local result alias.
 pub type Result<T> = core::result::Result<T, Error>;
+
+/// Coarse-grained taxonomy of [`Error`] variants for callers that want
+/// a recovery / retry policy that doesn't pattern-match on every
+/// variant individually.
+///
+/// The four categories partition every [`Error`] variant exactly once
+/// (verified by `tests/round13_error_taxonomy.rs`). A new variant
+/// added to `Error` MUST land in one of the four categories; the
+/// classifier is `#[non_exhaustive]` so adding a fifth category in a
+/// future round is a non-breaking change.
+///
+/// ## Recovery semantics
+///
+/// - [`MalformedStream`](ErrorCategory::MalformedStream) — the input
+///   bytes do not match the wire format documented in
+///   `docs/video/utvideo/spec/01..05`. The caller cannot recover by
+///   retrying with the same input; the producer's bytes are
+///   corrupt. A muxer driving the decoder over a packet stream MAY
+///   skip the offending packet and resync at the next keyframe.
+///   The `00dc`-chunk single-byte-flip sweep in
+///   `tests/round8_malformed_decode.rs` is the wire-format-bit-flip
+///   audit of this category.
+/// - [`ApiMisuse`](ErrorCategory::ApiMisuse) — the caller violated
+///   the typed contract of [`crate::encode_frame`] /
+///   [`crate::StreamConfig::new`] / [`crate::Extradata::ffmpeg_for`]
+///   (e.g. wrong plane count, mis-sized per-plane buffer, slice
+///   count outside `1..=256`, zero width/height). These are
+///   programming bugs the caller can fix with a corrected call;
+///   they do not indicate corrupt wire data.
+/// - [`Unsupported`](ErrorCategory::Unsupported) — the wire data is
+///   structurally valid but exercises a code path this build doesn't
+///   implement (raw / non-Huffman slice mode per `spec/01` §4.4.1;
+///   interlaced bit set per `spec/01` §4.4.2; future prediction
+///   modes per `spec/04`). These are bounded out-of-corpus paths
+///   documented in `audit/00-report.md` §5.2.
+/// - [`StreamShape`](ErrorCategory::StreamShape) — extradata or
+///   stream-level identification metadata was malformed (unknown
+///   FourCC, truncated extradata, wrong `frame_info_size`,
+///   dimension constraint). Sits between `MalformedStream` (per-frame
+///   wire) and `ApiMisuse` (caller-side typed misuse); a demuxer
+///   should reject the stream rather than re-attempt per-frame
+///   decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ErrorCategory {
+    /// Per-frame wire bytes do not match `spec/02` + `spec/05`.
+    /// Examples: `ChunkTooShort`, `NonMonotonicSliceOffsets`,
+    /// `SliceNotWordAligned`, `KraftViolation`,
+    /// `MultipleSingleSymbolSentinels`, `HuffmanDecodeFailure`,
+    /// `SliceTruncated`, `MissingFrameInfo`.
+    MalformedStream,
+    /// Caller-side typed contract violation. Examples:
+    /// `EncoderPlaneSizeMismatch`, `InvalidSliceCount`,
+    /// `InvalidInput`.
+    ApiMisuse,
+    /// Structurally valid wire data on a code path this build doesn't
+    /// implement. Examples: `HuffmanBitClear` (raw slice mode),
+    /// `InterlacedNotSupported`, `UnsupportedPrediction`.
+    Unsupported,
+    /// Stream-level identification metadata malformed (extradata /
+    /// FourCC / dims). Examples: `UnknownFourcc`,
+    /// `ExtradataTruncated`, `InvalidFrameInfoSize`,
+    /// `DimensionConstraint`.
+    StreamShape,
+}
+
+impl Error {
+    /// Coarse classification of this error for recovery / retry logic
+    /// (see [`ErrorCategory`] for the four categories and their
+    /// recovery semantics).
+    ///
+    /// The mapping is documented per-variant on [`Error`] and pinned
+    /// exhaustively by `tests/round13_error_taxonomy.rs` — adding a
+    /// new `Error` variant requires extending the `match` here in the
+    /// same commit (no `_ =>` fallback by design).
+    pub fn category(&self) -> ErrorCategory {
+        match self {
+            // Stream-level identification metadata.
+            Error::UnknownFourcc(_)
+            | Error::ExtradataTruncated { .. }
+            | Error::InvalidFrameInfoSize(_)
+            | Error::DimensionConstraint(_) => ErrorCategory::StreamShape,
+
+            // Caller-side typed contract violations.
+            Error::InvalidSliceCount
+            | Error::EncoderPlaneSizeMismatch { .. }
+            | Error::InvalidInput(_) => ErrorCategory::ApiMisuse,
+
+            // Structurally valid wire on a code path we don't implement.
+            Error::HuffmanBitClear
+            | Error::InterlacedNotSupported
+            | Error::UnsupportedPrediction(_) => ErrorCategory::Unsupported,
+
+            // Per-frame wire bytes do not match spec/02 + spec/05.
+            Error::ChunkTooShort { .. }
+            | Error::NonMonotonicSliceOffsets
+            | Error::SliceNotWordAligned(_)
+            | Error::KraftViolation
+            | Error::MultipleSingleSymbolSentinels
+            | Error::HuffmanDecodeFailure { .. }
+            | Error::SliceTruncated { .. }
+            | Error::MissingFrameInfo => ErrorCategory::MalformedStream,
+        }
+    }
+
+    /// True if this error indicates corrupt per-frame wire bytes
+    /// (category [`ErrorCategory::MalformedStream`]). A muxer-level
+    /// caller MAY skip the offending packet and resync.
+    pub fn is_malformed_stream(&self) -> bool {
+        matches!(self.category(), ErrorCategory::MalformedStream)
+    }
+
+    /// True if this error indicates the caller violated the typed
+    /// contract of the public API (category [`ErrorCategory::ApiMisuse`]).
+    /// These are programming bugs; the call cannot succeed without
+    /// caller-side fixes.
+    pub fn is_api_misuse(&self) -> bool {
+        matches!(self.category(), ErrorCategory::ApiMisuse)
+    }
+
+    /// True if this error indicates a structurally-valid wire path
+    /// this build doesn't implement (category
+    /// [`ErrorCategory::Unsupported`]). Bounded out-of-corpus paths
+    /// documented in `audit/00-report.md` §5.2.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(self.category(), ErrorCategory::Unsupported)
+    }
+
+    /// True if this error indicates stream-level identification
+    /// metadata is malformed (category [`ErrorCategory::StreamShape`]).
+    /// A demuxer should reject the stream rather than retry the frame.
+    pub fn is_stream_shape(&self) -> bool {
+        matches!(self.category(), ErrorCategory::StreamShape)
+    }
+}

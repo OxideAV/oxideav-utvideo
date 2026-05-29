@@ -5,6 +5,59 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 13 — `ErrorCategory` classifier + exhaustive `Display`
+regression suite + `InvalidSliceCount` message accuracy fix.** The
+crate's error surface (18 [`Error`] variants) has shipped without a
+structured way for callers to react to a failure — they either
+pattern-match every variant (brittle: a new variant added in a future
+round silently falls through at the call site) or rely on the
+informal "log the `Display` text" pattern. Round 13 adds an
+[`ErrorCategory`] enum with four buckets:
+
+- **`MalformedStream`** — per-frame wire bytes don't match spec/02 +
+  spec/05 (`ChunkTooShort`, `NonMonotonicSliceOffsets`,
+  `SliceNotWordAligned`, `KraftViolation`,
+  `MultipleSingleSymbolSentinels`, `HuffmanDecodeFailure`,
+  `SliceTruncated`, `MissingFrameInfo` — 8 variants). A muxer-level
+  caller MAY skip the offending packet and resync at the next
+  keyframe.
+- **`ApiMisuse`** — caller violated the typed contract
+  (`InvalidSliceCount`, `EncoderPlaneSizeMismatch`, `InvalidInput`
+  — 3 variants). The call cannot succeed without caller-side fixes.
+- **`Unsupported`** — wire data structurally valid on a code path
+  this build doesn't implement (`HuffmanBitClear`,
+  `InterlacedNotSupported`, `UnsupportedPrediction` — 3 variants).
+  Bounded out-of-corpus paths per `audit/00-report.md` §5.2.
+- **`StreamShape`** — stream-level identification metadata
+  malformed (`UnknownFourcc`, `ExtradataTruncated`,
+  `InvalidFrameInfoSize`, `DimensionConstraint` — 4 variants). A
+  demuxer should reject the stream rather than retry per-frame.
+
+`Error::category()` returns the bucket; convenience predicates
+`is_malformed_stream` / `is_api_misuse` / `is_unsupported` /
+`is_stream_shape` cover the four-way switch directly. The classifier
+`match` in `error.rs` has no `_ =>` fallback by design, so adding a
+new `Error` variant requires extending the mapping in the same commit.
+`ErrorCategory` is `#[non_exhaustive]` so introducing a fifth category
+in a future round is a non-breaking change. Plus an in-line fix to
+the `InvalidSliceCount` Display message: it read `"num_slices == 0"`
+but the variant is also produced for `> 256` — the new message names
+the full valid range `1..=256` (`spec/01` §4.4.3).
+
+New `tests/round13_error_taxonomy.rs` (22 tests) pins five invariants
+exhaustively across every variant: (1) every variant lives in exactly
+one category (partition correctness); (2) `Display` carries the
+`"oxideav-utvideo:"` crate-name prefix and is non-empty (so a future
+variant without the prefix trips here); (3) Display reports the
+variant's payload fields (FourCC hex, byte counts, bit positions,
+plane indices); (4) the `InvalidSliceCount` message names the full
+`1..=256` range, not the stale `== 0`; (5) `std::error::Error::source`
+returns `None` (the crate has no inner-wrapped errors). **174 tests**
+(was 152, +22). Headline estimate unchanged at **decode ~97% /
+encode ~96%**; this round is depth-mode public-API ergonomics, not
+new capability. ULH*/HBD/Lite/interlaced remain blocked on
+out-of-corpus docs.
+
 **Round 12 — second cargo-fuzz target: encode-then-decode roundtrip.**
 The decoder fuzz harness from round 10 covers the attacker-facing surface
 (arbitrary bytes through `decode_frame`). The encoder is a different
