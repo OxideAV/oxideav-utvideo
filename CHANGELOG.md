@@ -8,6 +8,71 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 14 — `Decoder` trait wiring from `CodecParameters` +
+  end-to-end integration suite.** The registry `make_decoder` factory
+  in `src/registry.rs` previously ignored `params.tag` /
+  `params.extradata` / `params.width` / `params.height` and left the
+  internal `StreamConfig` as `None`, relying on a private
+  `configure()` hook that callers driving the codec through the
+  `oxideav_core::Decoder` trait could not reach. The wiring now
+  mirrors the `oxideav-huffyuv` pattern: at factory time we derive
+  the FourCC from `CodecParameters.tag` (`CodecTag::Fourcc`), parse
+  `params.extradata` via `Extradata::parse`, and validate dims via
+  `StreamConfig::new`. Malformed extradata / chroma-constraint
+  violations surface as `CoreError::InvalidData` at construction time
+  so the container learns "this stream cannot decode" before any
+  packet is dispatched. Missing pieces (no tag, no dims, empty
+  extradata) leave `cfg` as `None` so the `configure()` hook still
+  works for legacy callers; the first `receive_frame` then surfaces
+  a "stream config not configured" diagnostic. Net effect: any
+  container that hands us a populated `CodecParameters` (which
+  `oxideav-avi` does today) gets a working trait-driven decoder
+  without downcasting.
+
+  New `tests/round14_decoder_trait_integration.rs` (21 tests) pins
+  the contract end-to-end:
+
+  - **Factory happy path on every FourCC** (1 test, ×5 cases):
+    construct a `Decoder` via `CodecRegistry::first_decoder`, feed a
+    chunk-payload produced by `encode_frame`, and assert the
+    `Frame::Video` carries the right plane count, per-plane stride
+    (= plane width), and per-plane payload length (= plane area).
+  - **Trait-path byte equality** (1 test): the trait wrapper's
+    `Frame::Video.planes[i].data` matches a direct `decode_frame`
+    call on the same payload, byte-for-byte, so the registry
+    introduces no transform between the codec output and the trait
+    callable.
+  - **State-machine contract** (5 tests): `receive_frame` before
+    `send_packet` returns `NeedMore`; `flush` then `receive_frame`
+    returns `Eof`; double `flush` is idempotent and still ends in
+    `Eof`; double `send_packet` without `receive_frame` rejects;
+    `pts` (`Some(_)` and `None`) flows through unchanged.
+  - **Construction-time rejection** (4 tests): truncated extradata,
+    Huffman-bit-clear extradata, interlaced-bit-set extradata, and
+    wrong `frame_info_size` all return `Error::InvalidData` from
+    `first_decoder`, never reaching a packet.
+  - **Construction-time dim validation** (2 tests): ULY0 odd width
+    and ULY2 odd width are rejected at factory time per `spec/02`
+    §3.2.
+  - **Construction-time deferral** (3 tests): empty extradata,
+    missing `params.tag`, and missing `params.width` all defer
+    config so the legacy `configure()` path stays usable. Decoding
+    a packet then surfaces the "not configured" diagnostic.
+  - **Cross-check** (3 tests): plane-label round-trip across all 5
+    FourCCs, `ProbeContext`-routed FourCC resolution maps to the
+    same codec id the factory is built against, multi-slice (128×128
+    ULY4, 4 slices) trait decode delivers the expected plane shape.
+  - **Capability flags + codec_id accessor** (2 tests): the
+    `caps.implementation` / `caps.lossless` / `caps.intra_only` /
+    `caps.decode` flags survive the round-14 wiring change;
+    `Decoder::codec_id` returns the registered id.
+
+  **195 tests** (was 174, +21). Headline estimate unchanged at
+  **decode ~97% / encode ~96%** — round 14 closes the framework
+  integration gap on the existing decode surface, not new
+  bitstream capability. ULH*/HBD/Lite/interlaced remain blocked
+  on out-of-corpus docs.
+
 - **Round 13 — `ErrorCategory` classifier + exhaustive `Display`
   regression suite.** The 18-variant [`Error`] surface had no
   structured taxonomy: callers either pattern-matched every variant

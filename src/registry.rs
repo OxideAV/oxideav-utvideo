@@ -17,6 +17,16 @@ use oxideav_core::{
 use crate::decoder::{decode_frame, DecodedFrame};
 use crate::fourcc::{Extradata, Fourcc, StreamConfig};
 
+/// Try to derive a [`Fourcc`] from `CodecParameters.tag`. The container
+/// crate sets `tag` to the on-wire FourCC (`spec/01` §2) during demux;
+/// this is the path the framework expects for container-routed streams.
+fn fourcc_from_params(params: &CodecParameters) -> Option<Fourcc> {
+    match params.tag.as_ref()? {
+        CodecTag::Fourcc(bytes) => Fourcc::from_bytes(*bytes).ok(),
+        _ => None,
+    }
+}
+
 /// Canonical codec id. `oxideav-meta::register_all` calls
 /// `crate::__oxideav_entry`, which delegates here.
 pub const CODEC_ID_STR: &str = "utvideo";
@@ -50,20 +60,56 @@ pub fn register(ctx: &mut RuntimeContext) {
 // ──────────────────────── Decoder impl ────────────────────────
 
 fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
+    // Round 14 — build the StreamConfig at factory time from the typed
+    // `CodecParameters` surface the container (e.g. `oxideav-avi`) fills:
+    //
+    //   * `params.tag` carries the on-wire FourCC (`spec/01` §2),
+    //   * `params.extradata` carries the 16-byte block (`spec/01` §4),
+    //   * `params.width` / `params.height` carry the frame dims.
+    //
+    // If any of those is missing we leave `cfg` as `None` and surface a
+    // diagnosable `Error::InvalidData` at `receive_frame` time. This
+    // mirrors the `oxideav-huffyuv` registry pattern (see that crate's
+    // `make_decoder`) so trait-driven decode works without callers
+    // having to downcast and call `configure()`.
+    let cfg = build_stream_config(params)?;
     Ok(Box::new(UtVideoDecoder {
         codec_id: params.codec_id.clone(),
-        cfg: None,
+        cfg,
         pending: None,
         eof: false,
     }))
 }
 
+/// Assemble a [`StreamConfig`] from `params` when every piece is present;
+/// returns `None` if the container has not yet supplied FourCC / dims /
+/// extradata so the decoder can be paired with a deferred `configure()`
+/// call. Returns `Err` only when the supplied pieces are inconsistent
+/// (malformed extradata, wrong FourCC, dimension constraint violation).
+fn build_stream_config(params: &CodecParameters) -> CoreResult<Option<StreamConfig>> {
+    let Some(fourcc) = fourcc_from_params(params) else {
+        return Ok(None);
+    };
+    let (Some(width), Some(height)) = (params.width, params.height) else {
+        return Ok(None);
+    };
+    if params.extradata.is_empty() {
+        return Ok(None);
+    }
+    let extradata = Extradata::parse(&params.extradata)
+        .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?;
+    let cfg = StreamConfig::new(fourcc, width, height, extradata)
+        .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?;
+    Ok(Some(cfg))
+}
+
 struct UtVideoDecoder {
     codec_id: CodecId,
-    /// Parsed identification surface; built lazily on the first
-    /// packet because `CodecParameters` doesn't expose extradata
-    /// directly via a typed API in round-1 callers — we reach for
-    /// the raw bytes via `params.extradata`.
+    /// Parsed identification surface. Built at factory time from the
+    /// `CodecParameters` the container handed in. Left as `None` when
+    /// the container has not yet supplied tag/dims/extradata — the
+    /// hidden `configure()` hook (or a future `set_params` call) fills
+    /// it in before the first `receive_frame`.
     cfg: Option<StreamConfig>,
     pending: Option<Packet>,
     eof: bool,

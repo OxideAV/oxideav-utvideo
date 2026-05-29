@@ -5,6 +5,41 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 14 — `Decoder` trait wiring from `CodecParameters` + end-to-end
+integration suite.** The registry [`make_decoder`] factory in
+`src/registry.rs` previously ignored `params.tag` / `params.extradata` /
+`params.width` / `params.height` and left the internal [`StreamConfig`]
+as `None`, relying on a private `configure()` hook that callers driving
+the codec through the `oxideav_core::Decoder` trait could not reach.
+The wiring now mirrors the `oxideav-huffyuv` pattern: at factory time we
+derive the FourCC from `CodecParameters.tag` (`CodecTag::Fourcc`), parse
+`params.extradata` via [`Extradata::parse`], and validate dims via
+[`StreamConfig::new`]. Malformed extradata or chroma-constraint
+violations surface as `Error::InvalidData` at construction time so the
+container learns "this stream cannot decode" before any packet is
+dispatched. Missing pieces (no tag, no dims, empty extradata) leave
+`cfg` as `None` so the `configure()` hook still works for legacy
+callers. Net effect: any container that hands us a populated
+`CodecParameters` (which `oxideav-avi` does today) now gets a working
+trait-driven decoder without downcasting.
+
+New `tests/round14_decoder_trait_integration.rs` (21 tests) pins five
+groups of invariants: factory happy path on every FourCC (plane count,
+stride, per-plane payload length match `spec/02` §3); trait-path
+byte-equality against a direct `decode_frame` call (no transform);
+state-machine contract (`NeedMore` before `send_packet`, `Eof` after
+`flush`, double-`send_packet` rejection, PTS pass-through); factory
+construction-time rejection of truncated / Huffman-clear / interlaced /
+wrong-`frame_info_size` extradata + ULY0 / ULY2 odd-width dim
+violations; deferred-config path when extradata / tag / dims are
+missing. Plus capability-flag preservation (`utvideo_sw` / `lossless` /
+`intra_only` / `decode`) and `ProbeContext` resolution cross-check.
+**195 tests** (was 174, +21). Headline estimate unchanged at
+**decode ~97% / encode ~96%** — round 14 closes the framework
+integration gap on the existing decode surface, not new bitstream
+capability. ULH*/HBD/Lite/interlaced remain blocked on out-of-corpus
+docs.
+
 **Round 13 — `ErrorCategory` classifier + exhaustive `Display`
 regression suite + `InvalidSliceCount` message accuracy fix.** The
 crate's error surface (18 [`Error`] variants) has shipped without a
