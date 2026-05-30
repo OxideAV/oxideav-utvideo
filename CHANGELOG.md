@@ -6,6 +6,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-utvideo/releases/tag/v0.0.2) - 2026-05-29
+
+### Other
+
+- Round 14 — Decoder trait wiring from CodecParameters + end-to-end integration
+- Round 13 — ErrorCategory classifier + exhaustive Display regression suite
+- add encode_utvideo_frame target + stable-CI mirror (round 12)
+- Round 11 — criterion benchmarks for decode + encode hot paths
+- Round 10 — cargo-fuzz decode harness
+- Round 9 — descriptor-mutation rejection + encoder API misuse + bit-pack/unpack invariants
+- Round 8 — malformed-payload decode robustness (negative tests)
+- Round 7 — encoder byte-stability (idempotency) + full 1..256 slice sweep
+- Round 6 — FFmpeg-pinned extradata builder + content-fixture corpus
+- Round 5 — slice-parallel encode via std::thread::scope
+- Round 4 — slice-parallel decode via std::thread::scope
+- Round 3 — LUT-accelerated Huffman decoder + word-aligned bit peek
+- Round 2 — exhaustive pattern matrix (corpus hardening)
+- Round 1 — classic-family decoder + encoder
+- Round 0 — clean-room rebuild scaffold (orphan master)
+
 ### Added
 
 - **Round 14 — `Decoder` trait wiring from `CodecParameters` +
