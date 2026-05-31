@@ -6,6 +6,55 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Round 15 — profile-driven Gradient + Median predictor refactor.**
+  The four per-pixel branches inside `predict::apply_gradient` /
+  `apply_median` (`r == r_start && c == 0` → 128 seed; `r == r_start`
+  → Left-of-current; `c == 0` → above-of-column-0; else MED / GRAD)
+  were checked at every pixel of every plane. Round 15 hoists the
+  row-0 and column-0 special cases out of the inner loop so the dense
+  interior runs branch-free as a tight cumulative add over `row[c-1]`
+  + the row-above delta. Mirror change on the encoder side
+  (`forward_gradient` / `forward_median`).
+
+  Measured wall-clock on the criterion baseline (same 8-core host as
+  Round 11; `benches/decode.rs` + `benches/encode.rs`):
+
+  | Bench                                 | Round 11  | Round 15  | Δ       |
+  | ------------------------------------- | --------- | --------- | ------- |
+  | `decode_ulrg_1080p_single` (Grad)     | 41.5 ms   | 32.6 ms   | **-24%** |
+  | `decode_uly2_1080p_single` (Grad)     | 27.3 ms   | 21.3 ms   | **-22%** |
+  | `decode_parallel_scaling/serial/1`    | 17.9 ms   | 14.3 ms   | **-20%** |
+  | `decode_parallel_scaling/parallel/8`  |  2.7 ms   |  2.26 ms  | **-16%** |
+  | `encode_ulrg_1080p_single` (Grad)     | 38.8 ms   | 30.2 ms   | **-22%** |
+  | `encode_uly2_1080p_single` (Grad)     | 23.9 ms   | 19.5 ms   | **-18%** |
+  | `encode_parallel_scaling/serial/1`    | 16.1 ms   | 13.1 ms   | **-19%** |
+
+  Decoder serial throughput rises from ~143 MiB/s to ~185 MiB/s on a
+  1080p Gradient frame; parallel/8 crosses the 1 GiB/s mark
+  (974 → 1140 MiB/s). The encoder gains ~20% across all path variants
+  because `predict::forward_slice` runs the same branch hierarchy
+  fix. Slice-parallel speedup ratio at 1280×720 ULY4 stays high at
+  6.2× (was 6.7× pre-refactor — both serial and parallel paths
+  improved, the ratio reflects the serial-baseline gain).
+
+  All 195 tests still pass byte-identical (no algorithmic change —
+  the optimisation is purely a branch / index-arithmetic refactor
+  that produces identical output bit-for-bit to the prior path).
+  `apply_left` / `apply_none` already ran as tight loops with no
+  per-pixel branch tree and are unchanged. Headline estimate
+  unchanged at **decode ~97% / encode ~96%** — Round 15 is depth-mode
+  performance, not new bitstream capability. ULH*/HBD/Lite/interlaced
+  remain blocked on out-of-corpus docs.
+
+  Wall: `docs/video/utvideo/spec/04` (predictor definitions, read-only,
+  for the algorithmic invariants underpinning the branch-hoist
+  proof) + `crates/oxideav-utvideo/{src/predict.rs, benches/decode.rs,
+  benches/encode.rs}` (in-crate). No external library source consulted;
+  no web search; no third-party Rust crate consulted; no FFmpeg /
+  libav* / reference encoder source read for any reason.
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-utvideo/releases/tag/v0.0.2) - 2026-05-29
 
 ### Other

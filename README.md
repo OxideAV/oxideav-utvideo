@@ -5,6 +5,33 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 15 — profile-driven Gradient + Median predictor refactor.**
+Decoder `apply_gradient` / `apply_median` had four per-pixel branches
+(row-0, column-0, etc.) checked inside the inner loop; round 15 hoists
+those special-cases out so the dense interior runs branch-free as a
+tight cumulative add over `row[c-1]` + the row-above delta. Mirror fix
+on the encoder side (`forward_gradient` / `forward_median`). Same
+bit-for-bit output (every one of the 195 tests still passes), but on
+the criterion baseline (`benches/decode.rs` + `benches/encode.rs`):
+
+| Bench                                 | Round 11  | Round 15  | Δ        |
+| ------------------------------------- | --------- | --------- | -------- |
+| `decode_ulrg_1080p_single` (Grad)     | 41.5 ms   | 32.6 ms   | **-24%** |
+| `decode_uly2_1080p_single` (Grad)     | 27.3 ms   | 21.3 ms   | **-22%** |
+| `decode_parallel_scaling/serial/1`    | 17.9 ms   | 14.3 ms   | **-20%** |
+| `decode_parallel_scaling/parallel/8`  |  2.7 ms   |  2.26 ms  | **-16%** |
+| `encode_ulrg_1080p_single` (Grad)     | 38.8 ms   | 30.2 ms   | **-22%** |
+| `encode_uly2_1080p_single` (Grad)     | 23.9 ms   | 19.5 ms   | **-18%** |
+| `encode_parallel_scaling/serial/1`    | 16.1 ms   | 13.1 ms   | **-19%** |
+
+Decoder serial throughput rises from ~143 MiB/s to ~185 MiB/s on a
+1080p Gradient frame; the parallel/8 path crosses 1 GiB/s (974 → 1140
+MiB/s). Slice-parallel speedup at 1280×720 ULY4 stays high at 6.2×.
+`apply_left` / `apply_none` already ran as tight cumulative loops and
+are unchanged. Headline estimate unchanged at **decode ~97% / encode
+~96%** — round 15 is depth-mode performance, not new bitstream
+capability.
+
 **Round 14 — `Decoder` trait wiring from `CodecParameters` + end-to-end
 integration suite.** The registry [`make_decoder`] factory in
 `src/registry.rs` previously ignored `params.tag` / `params.extradata` /
