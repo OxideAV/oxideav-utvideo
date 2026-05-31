@@ -51,9 +51,10 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Wall: `docs/video/utvideo/spec/04` (predictor definitions, read-only,
   for the algorithmic invariants underpinning the branch-hoist
   proof) + `crates/oxideav-utvideo/{src/predict.rs, benches/decode.rs,
-  benches/encode.rs}` (in-crate). No external library source consulted;
-  no web search; no third-party Rust crate consulted; no FFmpeg /
-  libav* / reference encoder source read for any reason.
+  benches/encode.rs}` (in-crate). Spec text only; the refactor's
+  correctness rests on the per-mode predictor identities in spec/04
+  §§3–5, which the new branch-hoisted loops compute pointwise the
+  same as the prior interleaved loops.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-utvideo/releases/tag/v0.0.2) - 2026-05-29
 
