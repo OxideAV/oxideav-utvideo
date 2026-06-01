@@ -93,24 +93,40 @@ pub fn apply_slice(pred: Predictor, strip: &mut [u8], width: usize, rows: usize,
 }
 
 fn apply_none(plane: &mut [u8], width: usize, r_start: usize, r_end: usize, residuals: &[u8]) {
-    let mut i = 0usize;
-    for r in r_start..r_end {
-        for c in 0..width {
-            plane[r * width + c] = residuals[i];
-            i += 1;
-        }
+    if width == 0 || r_end == r_start {
+        return;
+    }
+    debug_assert_eq!(residuals.len(), (r_end - r_start) * width);
+    // Row-strided copy. `chunks_exact_mut(width)` over the slice-strip
+    // gives the compiler a known row length so the inner copy is a
+    // bounds-check-free `copy_from_slice` (memcpy intrinsic).
+    let strip = &mut plane[r_start * width..r_end * width];
+    let dst_rows = strip.chunks_exact_mut(width);
+    let src_rows = residuals.chunks_exact(width);
+    for (dst, src) in dst_rows.zip(src_rows) {
+        dst.copy_from_slice(src);
     }
 }
 
 fn apply_left(plane: &mut [u8], width: usize, r_start: usize, r_end: usize, residuals: &[u8]) {
+    if width == 0 || r_end == r_start {
+        return;
+    }
+    debug_assert_eq!(residuals.len(), (r_end - r_start) * width);
+    // Continuous-wrap Left across rows: `prev` is the running cumulative
+    // running sum, seeded once at +128 per slice and carried row-to-row
+    // (column 0 of row r reads the running prev = `sample[r-1, W-1]`).
+    // Row-strided iteration so the inner add+store loop sees a fixed
+    // `width` slice (bounds-check elided after the first access).
+    let strip = &mut plane[r_start * width..r_end * width];
     let mut prev: u8 = 128;
-    let mut i = 0usize;
-    for r in r_start..r_end {
-        for c in 0..width {
-            let s = residuals[i].wrapping_add(prev);
-            plane[r * width + c] = s;
+    let dst_rows = strip.chunks_exact_mut(width);
+    let src_rows = residuals.chunks_exact(width);
+    for (dst, src) in dst_rows.zip(src_rows) {
+        for (d, &r) in dst.iter_mut().zip(src.iter()) {
+            let s = r.wrapping_add(prev);
+            *d = s;
             prev = s;
-            i += 1;
         }
     }
 }
@@ -277,19 +293,31 @@ pub fn forward_slice(
     let mut residuals = Vec::with_capacity(rows * width);
     match pred {
         Predictor::None => {
-            for r in r_start..r_end {
-                for c in 0..width {
-                    residuals.push(plane[r * width + c]);
+            // Row-strided copy: extend the residual buffer with each row
+            // as a contiguous slice (memcpy intrinsic, no per-pixel
+            // bounds check).
+            if width > 0 && r_end > r_start {
+                let strip = &plane[r_start * width..r_end * width];
+                for src in strip.chunks_exact(width) {
+                    residuals.extend_from_slice(src);
                 }
             }
         }
         Predictor::Left => {
-            let mut prev: u8 = 128;
-            for r in r_start..r_end {
-                for c in 0..width {
-                    let s = plane[r * width + c];
-                    residuals.push(s.wrapping_sub(prev));
-                    prev = s;
+            // Continuous-wrap Left: `prev` is the running cumulative
+            // baseline, +128-seeded per slice and carried across rows.
+            if width > 0 && r_end > r_start {
+                let total = (r_end - r_start) * width;
+                residuals.resize(total, 0);
+                let strip = &plane[r_start * width..r_end * width];
+                let mut prev: u8 = 128;
+                let src_rows = strip.chunks_exact(width);
+                let dst_rows = residuals.chunks_exact_mut(width);
+                for (src, dst) in src_rows.zip(dst_rows) {
+                    for (&s, d) in src.iter().zip(dst.iter_mut()) {
+                        *d = s.wrapping_sub(prev);
+                        prev = s;
+                    }
                 }
             }
         }

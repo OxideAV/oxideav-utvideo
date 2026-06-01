@@ -8,6 +8,44 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Round 16 — row-strided None + Left predictor refactor.** Round 15
+  hoisted the row-0 / column-0 branches out of the Gradient and Median
+  inner loops; the None and Left paths still iterated with per-pixel
+  `plane[r * width + c]` index arithmetic. Round 16 rewrites
+  `predict::apply_none` / `apply_left` and the matching forward
+  `Predictor::None` / `Predictor::Left` arms in `forward_slice` to use
+  row-strided `chunks_exact_mut(width)` / `chunks_exact(width)` over
+  the slice-strip's rows. The inner row sees a fixed `width` slice so
+  the compiler can elide the per-pixel bounds check; `apply_none`
+  lowers to a straight `copy_from_slice` (memcpy intrinsic).
+
+  Output remains bit-for-bit identical — the round is depth-mode code
+  structure / bounds-check elision, not new bitstream capability. All
+  195 prior tests still pass byte-equal.
+
+  Wall: `docs/video/utvideo/spec/04` (None/Left predictor definitions,
+  read-only — §3 identity, §4 continuous-wrap Left, §4.1.1 per-slice
+  +128 seed) + `crates/oxideav-utvideo/{src/predict.rs,
+  tests/round16_predictor_row_stride.rs}` (in-crate). Spec text only;
+  correctness rests on the per-mode predictor identities the new
+  row-strided loops compute pointwise the same as the prior interleaved
+  loops.
+
+### Added
+
+- `tests/round16_predictor_row_stride.rs` — 17 tests pinning the
+  byte-equality invariants the row-strided refactor must keep:
+  `apply_none` round-strip on every FOURCC × `{single, multi, uneven,
+  zero-row}` slice regimes; `apply_left` constant-zero / constant-V /
+  row-constant plane signatures (forcing the row-to-row state-carry
+  seam through `chunks_exact_mut`); 320×240 auto-dispatch byte-equality
+  on parallel paths; encode determinism; minimal-width-1 edge case;
+  cross-predictor parity. **212 tests** (was 195, +17). Headline
+  estimate unchanged at **decode ~97% / encode ~96%**. ULH*/HBD/Lite/
+  interlaced remain blocked on out-of-corpus docs.
+
+### Previously (Round 15)
+
 - **Round 15 — profile-driven Gradient + Median predictor refactor.**
   The four per-pixel branches inside `predict::apply_gradient` /
   `apply_median` (`r == r_start && c == 0` → 128 seed; `r == r_start`

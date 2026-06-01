@@ -5,6 +5,55 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 16 — row-strided None + Left predictor refactor.** Round 15
+hoisted the row-0 / column-0 branches out of the Gradient and Median
+inner loops. The None and Left paths still iterated with per-pixel
+`plane[r * width + c]` index arithmetic; the round-15 prose explicitly
+called them "already tight cumulative loops" and left them alone.
+Round 16 converts them to row-strided `chunks_exact_mut(width)`
+iteration so the inner row sees a fixed `width` slice — the compiler
+can elide the per-pixel bounds check, and `apply_none` lowers to a
+straight `copy_from_slice` (memcpy intrinsic) over the slice-strip's
+rows. Mirror change on the encoder side (`forward_slice` for the
+`Predictor::None` and `Predictor::Left` arms). The output is
+bit-for-bit identical (all 195 prior tests still pass byte-equal); the
+round is depth-mode code structure / bounds-check elision, not new
+bitstream capability.
+
+New `tests/round16_predictor_row_stride.rs` (17 tests) pins the
+byte-equality invariants the row-strided refactor must keep:
+
+- **`apply_none` is a pure row-strided copy** across the slice's row
+  range (`spec/04` §3 — identity predictor): round-trip every FOURCC
+  at single-slice / multi-slice / uneven-slice (`ph % N != 0`) /
+  zero-row-slice (`N > ph`) regimes.
+- **`apply_left` is the continuous-wrap Left predictor**: column 0
+  of row r reads `sample[r-1, W-1]` inside the slice (`spec/04` §4 +
+  §4.1.1 — per-slice +128 seed at the very first pixel only).
+  Constant-zero and constant-V plane decode signatures pinned (the
+  row-strided refactor MUST carry `prev` across the `chunks_exact_mut`
+  row boundary or the cumulative sum corrupts); row-constant plane
+  (each row r filled with `7r mod 256`) explicitly exercises the
+  row-to-row state-carry seam.
+- **Encode/decode byte-equality at the auto-dispatch threshold**:
+  320×240 ULY4 / ULY2 with 8 slices crosses
+  `PARALLEL_PIXEL_THRESHOLD` and exercises the parallel encode +
+  parallel decode paths under None and Left; the round-strided
+  refactor must produce the same bytes the serial path would.
+- **Determinism**: two encodes of the same input produce identical
+  bytes under None and Left (no iteration-order regression).
+- **Minimal-width edge case**: `width = 1` reduces every row to a
+  single pixel; the `chunks_exact_mut(1)` iterator must not skip rows
+  or panic.
+- **Cross-predictor parity**: the same input plane round-trips
+  bit-exact under all four predictors at single-slice — restates the
+  round-2 pattern-matrix invariant for the None/Left subset after the
+  refactor.
+
+**212 tests** (was 195, +17). Headline estimate unchanged at
+**decode ~97% / encode ~96%**. ULH*/HBD/Lite/interlaced remain blocked
+on out-of-corpus docs.
+
 **Round 15 — profile-driven Gradient + Median predictor refactor.**
 Decoder `apply_gradient` / `apply_median` had four per-pixel branches
 (row-0, column-0, etc.) checked inside the inner loop; round 15 hoists
