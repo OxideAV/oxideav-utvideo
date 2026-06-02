@@ -5,6 +5,69 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 17 — `Encoder` trait wiring from `CodecParameters` +
+end-to-end integration suite.** Round 14 closed the analogous gap on
+the decoder side: the registry `make_decoder` factory now derives the
+`StreamConfig` at construction time, so trait-driven decode works
+without callers having to downcast and call a private `configure()`
+hook. The encoder path stayed direct-API-only — the
+`oxideav_core::Encoder` trait was not implemented, capabilities did
+not advertise `with_encode()`, and no factory was registered. Round 17
+mirrors round 14 on the encode side. After this round
+`CodecCapabilities::with_encode()` is set, `CodecInfo::encoder` points
+at `registry::make_encoder`, and `oxideav_core::CodecRegistry::has_encoder`
+returns `true` for `"utvideo"`. A populated `CodecParameters` (FourCC
+in `tag` OR a YUV `pixel_format` + `width` / `height` + extradata)
+constructs an `Encoder` that takes `VideoFrame` through `send_frame` /
+`receive_packet` and produces wire-format payload bytes the decoder
+trait accepts. Missing extradata is synthesised via
+`Extradata::ffmpeg_for(fc, 1)`; a populated 16-byte block (`spec/01`
+§4) is preserved verbatim. Stride-padded plane buffers are repacked
+tight before encode so the producer's SIMD alignment leaks transparently
+to the wire. All emitted packets carry `flags.keyframe = true`
+(`spec/02` §1 — Ut Video is intra-only, stateless across frames).
+
+New `tests/round17_encoder_trait_integration.rs` (26 tests) pins six
+groups of invariants:
+
+- **Factory happy path** — every FourCC (ULRG/ULRA/ULY0/ULY2/ULY4)
+  constructs via `params.tag`; YUV trio also constructs via
+  `pixel_format` (Yuv420P→ULY0, Yuv422P→ULY2, Yuv444P→ULY4);
+  `output_params` reflects the resolved identification surface;
+  populated caller extradata round-trips through to `output_params`
+  (slice-count = 4 preserved).
+- **Trait-path byte-equality** — `send_frame` + `receive_packet`
+  produces the same bytes a direct `encode_frame(EncodedFrame)` call
+  would for every FourCC at single-slice 16×16 and multi-slice 32×32
+  (latter crosses the round-5 parallel-encode auto-dispatch).
+- **State-machine contract** — `NeedMore` before `send_frame`, `Eof`
+  after `flush`, double-`send_frame` rejection, `NeedMore` after
+  draining `receive_packet`, `flags.keyframe = true` on every emitted
+  packet, audio-frame rejection, PTS pass-through path.
+- **Factory construction-time rejection** — missing tag AND
+  pixel_format, missing dims, packed-RGB (`Rgb24` / `Rgba`) and
+  `Gray8` pixel formats (the planar GBR(A) wire layout cannot be
+  silently derived — `spec/04` §6 + `spec/02` §3.1), ULY0 odd-width
+  AND odd-height, ULY2 odd-width, truncated extradata all surface
+  `Error::Invalid` at `make_encoder` time.
+- **Plane-count + stride validation** — `send_frame` rejects 3-plane
+  ULRA / short plane buffers / stride below plane width;
+  stride-padded buffers are repacked tight and produce bytes
+  byte-identical to a direct tight-input encode.
+- **End-to-end round-trip via the traits** — encode through
+  `Encoder::send_frame` / `receive_packet`, decode through round-14
+  `Decoder::send_packet` / `receive_frame`, and assert sample-equal
+  per-plane output for every FourCC including the 32×32 ULY4
+  4-slice parallel-encode path.
+
+**238 tests** (was 212, +26). Headline estimate moves to
+**decode ~97% / encode ~97%** — round 17 closes the framework
+integration gap on the existing encode surface (the encoder bit on
+the workspace README capability column now reflects what the codec
+crate already shipped on the direct API), not new bitstream
+capability. ULH*/HBD/Lite/interlaced remain blocked on out-of-corpus
+docs.
+
 **Round 16 — row-strided None + Left predictor refactor.** Round 15
 hoisted the row-0 / column-0 branches out of the Gradient and Median
 inner loops. The None and Left paths still iterated with per-pixel

@@ -8,6 +8,46 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Round 17 — `Encoder` trait wiring from `CodecParameters` +
+  end-to-end integration suite.** Mirrors round 14 (decoder trait
+  wiring) on the encode side. The registry now advertises
+  `CodecCapabilities::with_encode()` and installs
+  `registry::make_encoder` so `CodecRegistry::has_encoder("utvideo")`
+  returns `true` and `first_encoder(&CodecParameters)` constructs a
+  trait-driven encoder. The encoder:
+    * derives `Fourcc` from `params.tag` when present, else from
+      `params.pixel_format` (Yuv420P→ULY0, Yuv422P→ULY2,
+      Yuv444P→ULY4);
+    * validates dims via `StreamConfig::new` (ULY0 even-W+H, ULY2
+      even-W) at factory time;
+    * synthesises a default-slice extradata via
+      `Extradata::ffmpeg_for(fc, 1)` when `params.extradata` is empty,
+      and preserves a populated 16-byte block verbatim (round-trips
+      slice-count through to `output_params`);
+    * accepts `Frame::Video` through `send_frame`, validates the plane
+      count against `Fourcc::plane_count()`, repacks stride-padded
+      plane buffers tight before encoding, and emits a `Packet` with
+      `flags.keyframe = true` (`spec/02` §1 — Ut Video is intra-only);
+    * rejects non-video frames, double `send_frame` without intervening
+      `receive_packet`, and stride below plane-width.
+
+### Added
+
+- `tests/round17_encoder_trait_integration.rs` — 26 tests pinning six
+  invariant groups: factory happy path on every FourCC × derivation
+  route (tag vs. pixel format); trait-path byte-equality against a
+  direct `encode_frame` call at single- and multi-slice; state-machine
+  contract (`NeedMore` / `Eof` / double-send / keyframe / non-video
+  rejection); factory construction-time rejection (missing
+  tag+pixel_format, missing dims, packed RGB / `Gray8`, ULY0/ULY2
+  dimension constraint violations, truncated extradata); plane-count +
+  stride validation (wrong plane count, short plane, stride-padded
+  repack tight); end-to-end round-trip through both traits and via the
+  pixel-format derivation path, including the 32×32 ULY4 4-slice
+  parallel-encode auto-dispatch path.
+
+### Changed (cont.)
+
 - **Round 16 — row-strided None + Left predictor refactor.** Round 15
   hoisted the row-0 / column-0 branches out of the Gradient and Median
   inner loops; the None and Left paths still iterated with per-pixel

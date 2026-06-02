@@ -1,6 +1,7 @@
 //! `oxideav-core` framework integration: codec registration plus the
-//! [`oxideav_core::Decoder`] implementation wrapping the crate's
-//! `decode_frame`.
+//! [`oxideav_core::Decoder`] and [`oxideav_core::Encoder`]
+//! implementations wrapping the crate's `decode_frame` /
+//! `encode_frame`.
 //!
 //! Compiled only when the default-on `registry` Cargo feature is
 //! enabled. Standalone consumers (`default-features = false`) skip
@@ -10,12 +11,13 @@
 
 use oxideav_core::{
     CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry, CodecTag, Decoder,
-    Error as CoreError, Frame, Packet, Result as CoreResult, RuntimeContext, VideoFrame,
-    VideoPlane,
+    Encoder, Error as CoreError, Frame, Packet, PixelFormat, Result as CoreResult, RuntimeContext,
+    TimeBase, VideoFrame, VideoPlane,
 };
 
 use crate::decoder::{decode_frame, DecodedFrame};
-use crate::fourcc::{Extradata, Fourcc, StreamConfig};
+use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 
 /// Try to derive a [`Fourcc`] from `CodecParameters.tag`. The container
 /// crate sets `tag` to the on-wire FourCC (`spec/01` §2) during demux;
@@ -36,12 +38,14 @@ pub const CODEC_ID_STR: &str = "utvideo";
 pub fn register_codecs(reg: &mut CodecRegistry) {
     let caps = CodecCapabilities::video("utvideo_sw")
         .with_decode()
+        .with_encode()
         .with_lossless(true)
         .with_intra_only(true);
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
             .decoder(make_decoder)
+            .encoder(make_encoder)
             .tags([
                 CodecTag::fourcc(b"ULRG"),
                 CodecTag::fourcc(b"ULRA"),
@@ -188,6 +192,219 @@ fn map_to_video_frame(frame: DecodedFrame, pts: Option<i64>) -> VideoFrame {
     VideoFrame { pts, planes }
 }
 
+// ──────────────────────── Encoder impl ────────────────────────
+
+/// Map a [`PixelFormat`] to the corresponding classic-family
+/// [`Fourcc`]. The YUV trio routes by chroma subsampling
+/// (`spec/02` §3.1). RGB / packed formats are not mapped: ULRG and
+/// ULRA carry **planar** GBR / GBRA on the wire (`spec/04` §6 +
+/// `spec/02` §3.1), so a caller asking for those must declare it via
+/// `params.tag` and hand in three / four 8-bit planes.
+fn fourcc_from_pixel_format(fmt: PixelFormat) -> Option<Fourcc> {
+    match fmt {
+        PixelFormat::Yuv420P => Some(Fourcc::Uly0),
+        PixelFormat::Yuv422P => Some(Fourcc::Uly2),
+        PixelFormat::Yuv444P => Some(Fourcc::Uly4),
+        _ => None,
+    }
+}
+
+/// Build the encoder-side identification surface. The container is
+/// expected to supply either `params.tag` (FourCC) or
+/// `params.pixel_format` together with `params.width` / `params.height`
+/// and `params.extradata` (16 bytes per `spec/01` §4). When the tag is
+/// absent we derive it from the pixel format; when extradata is empty
+/// we synthesise the FFmpeg-pinned 16-byte block via
+/// [`Extradata::ffmpeg_for`] so encoder construction stays a
+/// single-call API for callers driving us through the framework's
+/// [`Encoder`] trait without staging a separate extradata builder.
+fn build_encoder_config(params: &CodecParameters) -> CoreResult<StreamConfig> {
+    let fourcc = match fourcc_from_params(params) {
+        Some(fc) => fc,
+        None => match params.pixel_format {
+            Some(fmt) => fourcc_from_pixel_format(fmt).ok_or_else(|| {
+                CoreError::invalid(format!(
+                    "oxideav-utvideo: encoder cannot derive FourCC from pixel format {fmt:?} — \
+                     set CodecParameters::tag to a Ut Video FourCC (ULRG/ULRA/ULY0/ULY2/ULY4)"
+                ))
+            })?,
+            None => {
+                return Err(CoreError::invalid(
+                    "oxideav-utvideo: encoder needs CodecParameters::tag or pixel_format",
+                ));
+            }
+        },
+    };
+    let (Some(width), Some(height)) = (params.width, params.height) else {
+        return Err(CoreError::invalid(
+            "oxideav-utvideo: encoder needs CodecParameters::width / height",
+        ));
+    };
+    let extradata = if params.extradata.is_empty() {
+        // Synthesise a default-slice (single-slice) extradata so callers
+        // can drive the encoder without first plumbing an extradata
+        // builder. Containers that round-trip a populated extradata
+        // through demux → re-encode get exact byte-equality with the
+        // input via the populated branch below.
+        Extradata::ffmpeg_for(fourcc, 1)
+            .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?
+    } else {
+        Extradata::parse(&params.extradata)
+            .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?
+    };
+    StreamConfig::new(fourcc, width, height, extradata)
+        .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))
+}
+
+fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
+    let cfg = build_encoder_config(params)?;
+    let mut out_params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+    out_params.width = Some(cfg.width);
+    out_params.height = Some(cfg.height);
+    out_params.pixel_format = params.pixel_format;
+    out_params.tag = Some(CodecTag::fourcc(cfg.fourcc.as_bytes()));
+    out_params.extradata = cfg.extradata.to_bytes().to_vec();
+    Ok(Box::new(UtVideoEncoder {
+        codec_id: CodecId::new(CODEC_ID_STR),
+        cfg,
+        // Round 15/16 perf wins live on the Gradient predictor; pick it
+        // as the trait-path default. Callers that want None / Left /
+        // Median use the direct `encode_frame` API.
+        predictor: Predictor::Gradient,
+        out_params,
+        pending: None,
+        eof: false,
+    }))
+}
+
+struct UtVideoEncoder {
+    codec_id: CodecId,
+    cfg: StreamConfig,
+    predictor: Predictor,
+    out_params: CodecParameters,
+    pending: Option<Vec<u8>>,
+    eof: bool,
+}
+
+impl Encoder for UtVideoEncoder {
+    fn codec_id(&self) -> &CodecId {
+        &self.codec_id
+    }
+
+    fn output_params(&self) -> &CodecParameters {
+        &self.out_params
+    }
+
+    fn send_frame(&mut self, frame: &Frame) -> CoreResult<()> {
+        if self.pending.is_some() {
+            return Err(CoreError::other(
+                "oxideav-utvideo: receive_packet must be called before sending another frame",
+            ));
+        }
+        let vf = match frame {
+            Frame::Video(v) => v,
+            _ => {
+                return Err(CoreError::invalid(
+                    "oxideav-utvideo: encoder expected a video frame",
+                ));
+            }
+        };
+        let expected_planes = self.cfg.fourcc.plane_count();
+        if vf.planes.len() != expected_planes {
+            return Err(CoreError::invalid(format!(
+                "oxideav-utvideo: encoder expected {expected_planes} planes for FourCC {:?}, got {}",
+                self.cfg.fourcc,
+                vf.planes.len()
+            )));
+        }
+        // Repack each plane onto a tight `width * height` buffer so
+        // `encode_frame` sees the layout it documents (one row per
+        // `plane_dim().0` bytes, no stride padding). When the caller
+        // already supplies a tight buffer (`stride == plane_width`)
+        // this is a single `Vec::clone` per plane; padded strides
+        // copy row-by-row.
+        let mut planes: Vec<PlaneInput> = Vec::with_capacity(expected_planes);
+        for (idx, plane) in vf.planes.iter().enumerate() {
+            let (pw, ph) = self
+                .cfg
+                .fourcc
+                .plane_dim(idx, self.cfg.width, self.cfg.height);
+            let pw = pw as usize;
+            let ph = ph as usize;
+            let expected = pw * ph;
+            let samples = if plane.stride == pw {
+                if plane.data.len() < expected {
+                    return Err(CoreError::invalid(format!(
+                        "oxideav-utvideo: plane {idx} has {} bytes, expected {expected} \
+                         ({pw}x{ph})",
+                        plane.data.len()
+                    )));
+                }
+                plane.data[..expected].to_vec()
+            } else if plane.stride >= pw {
+                // Stride-padded buffer — copy `pw` bytes per row.
+                if plane.data.len() < plane.stride * ph {
+                    return Err(CoreError::invalid(format!(
+                        "oxideav-utvideo: plane {idx} has {} bytes, expected at least \
+                         stride*height = {}",
+                        plane.data.len(),
+                        plane.stride * ph
+                    )));
+                }
+                let mut tight = Vec::with_capacity(expected);
+                for r in 0..ph {
+                    let row_start = r * plane.stride;
+                    tight.extend_from_slice(&plane.data[row_start..row_start + pw]);
+                }
+                tight
+            } else {
+                return Err(CoreError::invalid(format!(
+                    "oxideav-utvideo: plane {idx} stride {} is below plane width {pw}",
+                    plane.stride
+                )));
+            };
+            planes.push(PlaneInput { samples });
+        }
+        let efr = EncodedFrame {
+            fourcc: self.cfg.fourcc,
+            width: self.cfg.width,
+            height: self.cfg.height,
+            predictor: self.predictor,
+            num_slices: self.cfg.num_slices(),
+            planes,
+        };
+        let bytes =
+            encode_frame(&efr).map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?;
+        self.pending = Some(bytes);
+        Ok(())
+    }
+
+    fn receive_packet(&mut self) -> CoreResult<Packet> {
+        match self.pending.take() {
+            Some(bytes) => {
+                let mut pkt = Packet::new(0, TimeBase::new(1, 1), bytes);
+                // All Ut Video frames are intra-only (the codec is
+                // lossless and stateless across frames — `spec/02` §1),
+                // so every emitted packet is a keyframe.
+                pkt.flags.keyframe = true;
+                Ok(pkt)
+            }
+            None => {
+                if self.eof {
+                    Err(CoreError::Eof)
+                } else {
+                    Err(CoreError::NeedMore)
+                }
+            }
+        }
+    }
+
+    fn flush(&mut self) -> CoreResult<()> {
+        self.eof = true;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +418,10 @@ mod tests {
         assert!(
             ctx.codecs.has_decoder(&codec_id),
             "codec registration should install a decoder factory"
+        );
+        assert!(
+            ctx.codecs.has_encoder(&codec_id),
+            "codec registration should install an encoder factory"
         );
     }
 
