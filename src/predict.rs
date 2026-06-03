@@ -399,6 +399,116 @@ pub fn forward_slice(
     residuals
 }
 
+/// Cross-entropy proxy over the residual symbol distribution of a
+/// sampled row-strip — used by [`choose_predictor`] to pick the
+/// predictor that the per-plane Huffman code will compress shortest.
+///
+/// Returns `Σ count[s] · log2(N / count[s])` (Shannon entropy of the
+/// 256-bin histogram, scaled by total sample count). The Huffman
+/// code-length lower bound IS the entropy; the package-merge code we
+/// build in `encoder::build_lengths` typically lands within a fraction
+/// of a bit per symbol of that bound, so a lower entropy reliably
+/// predicts a smaller per-plane wire blob.
+///
+/// `samples` must be non-empty.
+fn entropy_proxy(residuals: &[u8]) -> f64 {
+    debug_assert!(!residuals.is_empty());
+    let mut counts = [0u32; 256];
+    for &r in residuals {
+        counts[r as usize] += 1;
+    }
+    let n = residuals.len() as f64;
+    let log2_n = n.log2();
+    let mut bits = 0.0_f64;
+    for &c in &counts {
+        if c > 0 {
+            let cf = c as f64;
+            // `c * log2(N / c)` = `c * log2(N) - c * log2(c)`.
+            bits += cf * log2_n - cf * cf.log2();
+        }
+    }
+    bits
+}
+
+/// Pick the predictor (None / Left / Gradient / Median) that minimises
+/// the Huffman-code entropy lower bound on a representative sample of
+/// `plane`. Used by the [`oxideav_core::Encoder`] trait path to switch
+/// from the round-17 hardcoded `Gradient` default to a content-adaptive
+/// per-frame choice; the direct [`crate::encode_frame`] API still
+/// accepts an explicit [`Predictor`] verbatim.
+///
+/// The heuristic samples up to [`HEURISTIC_SAMPLE_ROWS`] rows starting
+/// from row 0 of the plane (the slice-0 +128 seed convention of all
+/// four predictors per `spec/04` §§3.1, 4, 5, 7 means the row-0
+/// residuals genuinely characterise the predictor's behaviour). Each
+/// predictor's per-row residuals are computed via [`forward_slice`]
+/// over the sampled-row range; the predictor with the lowest
+/// [`entropy_proxy`] wins.
+///
+/// Ties (within `1e-6` bits) break in the order
+/// `Gradient → Median → Left → None`: this matches the round-11
+/// benchmark ordering where Gradient was the fastest dense kernel
+/// AND most often the best compressor on natural content; it
+/// degrades gracefully to Median on JPEG-LS-MED-friendly inputs and
+/// to Left on row-correlated content.
+///
+/// `width` and `plane_height` describe the plane's true dimensions
+/// (post-RGB-decorrelation for ULRG/ULRA's B and R planes); the
+/// caller must pass the same `plane` slice it will hand to
+/// [`forward`]. Returns [`Predictor::Gradient`] as a safe fallback
+/// when the plane has zero rows or zero columns (degenerate inputs
+/// where every predictor produces an empty residual stream).
+pub fn choose_predictor(plane: &[u8], width: usize, plane_height: usize) -> Predictor {
+    if width == 0 || plane_height == 0 {
+        return Predictor::Gradient;
+    }
+    debug_assert_eq!(plane.len(), width * plane_height);
+
+    // Sample the first `HEURISTIC_SAMPLE_ROWS` rows. The +128 first-pixel
+    // seed dominates the column-0 statistics of every predictor, so the
+    // top rows are representative of the whole slice; sampling more rows
+    // would barely improve the choice and slow the heuristic on large
+    // frames.
+    let sample_rows = HEURISTIC_SAMPLE_ROWS.min(plane_height);
+
+    // Candidate order pins the tie-break preference.
+    let candidates = [
+        Predictor::Gradient,
+        Predictor::Median,
+        Predictor::Left,
+        Predictor::None,
+    ];
+
+    let mut best = Predictor::Gradient;
+    let mut best_bits = f64::INFINITY;
+    for &p in &candidates {
+        let residuals = forward_slice(p, plane, width, 0, sample_rows);
+        if residuals.is_empty() {
+            // Defensive: forward_slice over a 1-pixel sample CAN happen
+            // for width=plane_height=1; entropy of one symbol is zero so
+            // every predictor "ties". Stick with the first-preferred.
+            continue;
+        }
+        let bits = entropy_proxy(&residuals);
+        // Tie-break: strict `<` keeps the first-encountered candidate
+        // (Gradient → Median → Left → None) on equal entropies.
+        if bits + 1e-6 < best_bits {
+            best_bits = bits;
+            best = p;
+        }
+    }
+    best
+}
+
+/// Row-sample budget for [`choose_predictor`]. Set to 8 rows: the
+/// universal per-slice +128 first-pixel seed (`spec/04` §§3.1, 4, 5, 7)
+/// makes the leading rows representative of the predictor's
+/// downstream behaviour, and 8 rows × 1920 columns = 15 KiB of work per
+/// predictor candidate × 4 predictors = 60 KiB total — negligible
+/// compared to a full-frame Huffman pass at ≥160 MiB/s (round-11
+/// benchmark baseline).
+pub const HEURISTIC_SAMPLE_ROWS: usize = 8;
+
 /// RGB inverse decorrelation per `spec/04` §6: the encoder stored
 /// `B' = (B - G + 128) mod 256` and `R' = (R - G + 128) mod 256`;
 /// this undoes the +128 offset and the green subtraction. Operates

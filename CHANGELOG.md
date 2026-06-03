@@ -8,6 +8,54 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Round 18 — content-adaptive trait-path predictor heuristic.**
+  Round 17 wired the [`oxideav_core::Encoder`] trait path with a
+  hardcoded `Predictor::Gradient` for every frame. Round 18 replaces
+  that default with a per-frame heuristic: the trait encoder now calls
+  [`predict::choose_predictor`] on the first plane (luma for YUV /
+  G for RGB) and uses the result for every plane of that frame. The
+  heuristic samples up to `HEURISTIC_SAMPLE_ROWS = 8` leading rows
+  under each of the four candidate predictors (None / Left / Gradient /
+  Median) and picks the one whose residual histogram has the lowest
+  Shannon-entropy proxy — i.e. the per-plane Huffman code-length lower
+  bound (`spec/05` §2.2). Tie-break order is `Gradient → Median →
+  Left → None`, matching the round-15/16 dense-kernel benchmark
+  ordering. The single per-frame predictor mirrors what `frame_info`
+  bits 8..9 encode on the wire (`spec/02` §6.1). Direct-API callers of
+  `encode_frame(EncodedFrame { predictor, .. })` are unaffected — they
+  still hand in an explicit predictor verbatim.
+- **Round 18 — `UtVideoEncoder::set_predictor` override hook.**
+  Callers that need to pin a specific predictor on the trait path
+  (testing / external policy / round-17 byte-equality) downcast and
+  call `set_predictor(Some(Predictor::Gradient))`; passing `None`
+  re-enables the heuristic. The hook is `#[allow(dead_code)]`-gated
+  for the trait-object case (no `Any`-downcasting on `Box<dyn
+  Encoder>` today) and reachable from the registry-module test suite.
+
+### Added
+
+- `predict::choose_predictor(plane, width, plane_height) -> Predictor`
+  — per-plane heuristic returning the predictor with the lowest
+  Shannon-entropy proxy on a sampled-row residual histogram. Public.
+- `predict::HEURISTIC_SAMPLE_ROWS = 8` — the sample-row budget. Public
+  constant so external callers can size their own pre-encode sampling
+  to match the heuristic's working set.
+- `tests/round18_predictor_heuristic.rs` — 17 tests pinning the
+  heuristic across six invariant groups: content-discrimination on
+  synthesised plane shapes (constant-plane → None, horizontal-stripes
+  → Left/Gradient, linear-ramp → Gradient/Median/Left); determinism
+  across repeated calls AND invariance under garbage rows past the
+  sample budget; degenerate-input guard (zero-dim / width=1 /
+  height=1 / height<sample_budget); trait-path round-trip under
+  heuristic on every FourCC + on solid-plane + on linear-ramp;
+  non-regression on entropy floor (heuristic choice within 0.5
+  bit/sample of the full-frame optimum, strictly beats `None` on
+  Gradient-friendly content); direct-API independence (explicit-
+  predictor encode bytes diverge under different predictors AND
+  decode-equal to the same plane). Plus 3 unit tests inside
+  `src/registry.rs` exercising the `set_predictor` override hook
+  through the inspected `frame_info` bits 8..9 of the encoded packet.
+
 - **Round 17 — `Encoder` trait wiring from `CodecParameters` +
   end-to-end integration suite.** Mirrors round 14 (decoder trait
   wiring) on the encode side. The registry now advertises

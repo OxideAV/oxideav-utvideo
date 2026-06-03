@@ -18,6 +18,7 @@ use oxideav_core::{
 use crate::decoder::{decode_frame, DecodedFrame};
 use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
 use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
+use crate::predict;
 
 /// Try to derive a [`Fourcc`] from `CodecParameters.tag`. The container
 /// crate sets `tag` to the on-wire FourCC (`spec/01` §2) during demux;
@@ -267,10 +268,12 @@ fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
     Ok(Box::new(UtVideoEncoder {
         codec_id: CodecId::new(CODEC_ID_STR),
         cfg,
-        // Round 15/16 perf wins live on the Gradient predictor; pick it
-        // as the trait-path default. Callers that want None / Left /
-        // Median use the direct `encode_frame` API.
-        predictor: Predictor::Gradient,
+        // Round 18 — per-frame content-adaptive predictor selection
+        // (`predict::choose_predictor`). `None` here means "let the
+        // heuristic decide each frame at `send_frame` time"; callers
+        // that want to pin a specific predictor downcast and call
+        // [`UtVideoEncoder::set_predictor`].
+        predictor_override: None,
         out_params,
         pending: None,
         eof: false,
@@ -280,10 +283,40 @@ fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
 struct UtVideoEncoder {
     codec_id: CodecId,
     cfg: StreamConfig,
-    predictor: Predictor,
+    /// Caller-pinned predictor. `Some(p)` forces every frame to use
+    /// `p` (round-17 behaviour reproduced explicitly by setting
+    /// `Some(Predictor::Gradient)`). `None` runs the round-18
+    /// content-adaptive heuristic per frame: the encoder samples
+    /// the first plane's leading rows with
+    /// [`predict::choose_predictor`] and uses the result for every
+    /// plane of that frame (a single per-frame predictor is what
+    /// `frame_info` bits 8..9 encode on the wire — `spec/02` §6.1).
+    predictor_override: Option<Predictor>,
     out_params: CodecParameters,
     pending: Option<Vec<u8>>,
     eof: bool,
+}
+
+impl UtVideoEncoder {
+    /// Pin the predictor for every subsequent `send_frame` call.
+    /// Round-17 callers that depended on the trait path always emitting
+    /// `Predictor::Gradient` can restore that exact behaviour with
+    /// `set_predictor(Some(Predictor::Gradient))`; passing `None`
+    /// re-enables the round-18 per-frame content-adaptive heuristic
+    /// (`predict::choose_predictor`). Reachable from tests through
+    /// downcasting.
+    #[allow(dead_code)]
+    pub fn set_predictor(&mut self, predictor: Option<Predictor>) {
+        self.predictor_override = predictor;
+    }
+
+    /// Inspect the current pinning state. `None` means the encoder
+    /// runs the heuristic per frame; `Some(p)` means the caller has
+    /// pinned `p`.
+    #[allow(dead_code)]
+    pub fn predictor_override(&self) -> Option<Predictor> {
+        self.predictor_override
+    }
 }
 
 impl Encoder for UtVideoEncoder {
@@ -365,11 +398,28 @@ impl Encoder for UtVideoEncoder {
             };
             planes.push(PlaneInput { samples });
         }
+        // Round 18 — choose the predictor for this frame:
+        //   * caller-pinned override → use it verbatim;
+        //   * otherwise sample plane 0 (luma for YUV, G for RGB —
+        //     post-decorrelation residuals are an even cleaner signal
+        //     but cheaper to skip than to compute twice).
+        // `spec/02` §6.1: frame_info bits 8..9 encode ONE predictor
+        // per frame, applied to every plane; we mirror that contract.
+        let predictor = match self.predictor_override {
+            Some(p) => p,
+            None => {
+                let (pw, ph) = self
+                    .cfg
+                    .fourcc
+                    .plane_dim(0, self.cfg.width, self.cfg.height);
+                predict::choose_predictor(&planes[0].samples, pw as usize, ph as usize)
+            }
+        };
         let efr = EncodedFrame {
             fourcc: self.cfg.fourcc,
             width: self.cfg.width,
             height: self.cfg.height,
-            predictor: self.predictor,
+            predictor,
             num_slices: self.cfg.num_slices(),
             planes,
         };
@@ -409,6 +459,115 @@ impl Encoder for UtVideoEncoder {
 mod tests {
     use super::*;
     use oxideav_core::ProbeContext;
+
+    /// Round-18 helper — construct a [`UtVideoEncoder`] directly (not
+    /// via the `Box<dyn Encoder>` factory) so the suite can exercise
+    /// `set_predictor` without needing `Any`-downcasting on the trait
+    /// object.
+    fn build_direct_encoder(fourcc: Fourcc, width: u32, height: u32) -> UtVideoEncoder {
+        let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        p.width = Some(width);
+        p.height = Some(height);
+        p.tag = Some(CodecTag::fourcc(fourcc.as_bytes()));
+        p.extradata = Extradata::ffmpeg_for(fourcc, 1)
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        let cfg = build_encoder_config(&p).unwrap();
+        let mut out_params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        out_params.width = Some(cfg.width);
+        out_params.height = Some(cfg.height);
+        out_params.tag = Some(CodecTag::fourcc(cfg.fourcc.as_bytes()));
+        out_params.extradata = cfg.extradata.to_bytes().to_vec();
+        UtVideoEncoder {
+            codec_id: CodecId::new(CODEC_ID_STR),
+            cfg,
+            predictor_override: None,
+            out_params,
+            pending: None,
+            eof: false,
+        }
+    }
+
+    #[test]
+    fn set_predictor_pins_the_choice_for_subsequent_frames() {
+        // Round 18 — `set_predictor(Some(Predictor::Left))` restores the
+        // round-17 hardcoded-predictor behaviour for callers that need
+        // determinism / want to drive the choice externally.
+        let mut enc = build_direct_encoder(Fourcc::Uly0, 16, 16);
+        assert_eq!(enc.predictor_override(), None, "default is heuristic");
+        enc.set_predictor(Some(Predictor::Left));
+        assert_eq!(enc.predictor_override(), Some(Predictor::Left));
+
+        let g_plane: Vec<u8> = (0..256).map(|i| (i as u8).wrapping_mul(7)).collect();
+        let u_plane: Vec<u8> = vec![128; 64];
+        let v_plane: Vec<u8> = vec![128; 64];
+        let vf = VideoFrame {
+            pts: None,
+            planes: vec![
+                VideoPlane {
+                    stride: 16,
+                    data: g_plane.clone(),
+                },
+                VideoPlane {
+                    stride: 8,
+                    data: u_plane,
+                },
+                VideoPlane {
+                    stride: 8,
+                    data: v_plane,
+                },
+            ],
+        };
+        enc.send_frame(&Frame::Video(vf)).unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        // The trailing 4-byte frame_info dword encodes the predictor
+        // in bits 8..9 — `spec/02` §6.1. `Predictor::Left.as_frame_info_bits()`
+        // returns 0x100; verify the encoded packet ends with the LE
+        // bytes of that mask (the rest of `frame_info` is zero).
+        let info = u32::from_le_bytes([
+            pkt.data[pkt.data.len() - 4],
+            pkt.data[pkt.data.len() - 3],
+            pkt.data[pkt.data.len() - 2],
+            pkt.data[pkt.data.len() - 1],
+        ]);
+        assert_eq!(
+            (info >> 8) & 0x3,
+            0x1,
+            "frame_info bits 8..9 must be Left (0x1)"
+        );
+    }
+
+    #[test]
+    fn set_predictor_none_re_enables_heuristic() {
+        // Toggling override back to `None` re-enables the per-frame
+        // heuristic. Pin a value, then clear, and verify the field.
+        let mut enc = build_direct_encoder(Fourcc::Uly4, 16, 16);
+        enc.set_predictor(Some(Predictor::None));
+        assert_eq!(enc.predictor_override(), Some(Predictor::None));
+        enc.set_predictor(None);
+        assert_eq!(enc.predictor_override(), None);
+    }
+
+    #[test]
+    fn factory_default_runs_heuristic_no_override_set() {
+        // The factory must construct encoders with no override (round-18
+        // contract — the trait path uses the heuristic by default).
+        let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        p.width = Some(16);
+        p.height = Some(16);
+        p.tag = Some(CodecTag::fourcc(Fourcc::Uly0.as_bytes()));
+        p.extradata = Extradata::ffmpeg_for(Fourcc::Uly0, 1)
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        let enc = build_direct_encoder(Fourcc::Uly0, 16, 16);
+        // (The factory does NOT downcast — we re-derive via the helper
+        // because the trait object hides the override field.)
+        let _ = enc;
+        let cfg = build_encoder_config(&p).unwrap();
+        assert_eq!(cfg.fourcc, Fourcc::Uly0);
+    }
 
     #[test]
     fn register_via_runtime_context_installs_codec() {

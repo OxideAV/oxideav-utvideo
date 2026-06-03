@@ -55,7 +55,7 @@ use oxideav_core::{
 
 use oxideav_utvideo::decoder::decode_frame as direct_decode;
 use oxideav_utvideo::encoder::{encode_frame as direct_encode, EncodedFrame, PlaneInput};
-use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
+use oxideav_utvideo::fourcc::{Extradata, Fourcc, StreamConfig};
 use oxideav_utvideo::registry::CODEC_ID_STR;
 
 fn build_params_with_tag(fourcc: Fourcc, w: u32, h: u32, slices: usize) -> CodecParameters {
@@ -122,21 +122,25 @@ fn build_encoded_frame_mirror(
     slices: usize,
     vf: &VideoFrame,
 ) -> EncodedFrame {
-    let planes = vf
+    let planes: Vec<PlaneInput> = vf
         .planes
         .iter()
         .map(|p| PlaneInput {
             samples: p.data.clone(),
         })
         .collect();
+    // Round 18 — the trait path now picks the predictor per-frame from
+    // the content of plane 0 via `predict::choose_predictor` (no more
+    // hardcoded `Predictor::Gradient`). The mirror direct-API call must
+    // use the same heuristic so the bytes line up.
+    let (pw, ph) = fourcc.plane_dim(0, w, h);
+    let predictor =
+        oxideav_utvideo::predict::choose_predictor(&planes[0].samples, pw as usize, ph as usize);
     EncodedFrame {
         fourcc,
         width: w,
         height: h,
-        // The registry encoder picks Gradient (round 15/16 perf wins
-        // land there); the mirror direct-API call must use the same
-        // predictor so the bytes match.
-        predictor: Predictor::Gradient,
+        predictor,
         num_slices: slices,
         planes,
     }

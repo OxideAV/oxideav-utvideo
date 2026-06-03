@@ -5,6 +5,79 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 18 — content-adaptive trait-path predictor heuristic.** Round
+17 wired the `oxideav_core::Encoder` trait path with a hardcoded
+`Predictor::Gradient` for every frame: callers driving the codec
+through the framework's trait surface had no way to switch predictor
+short of dropping out of the trait and using the direct
+`encode_frame(EncodedFrame { predictor, .. })` API. Round 18 replaces
+that hardcoded default with a per-frame entropy-driven heuristic.
+The new `predict::choose_predictor(plane, width, plane_height) ->
+Predictor` samples up to `HEURISTIC_SAMPLE_ROWS = 8` leading rows of
+the input plane under each of the four candidate predictors (None /
+Left / Gradient / Median), computes `Σ count[s] · log2(N / count[s])`
+on each residual histogram (the Huffman code-length lower bound per
+`spec/05` §2.2), and picks the predictor with the lowest bit cost.
+The trait encoder runs this on plane 0 (luma for YUV / G for RGB)
+and applies the result to every plane of the frame — matching the
+single per-frame predictor that `frame_info` bits 8..9 encode on
+the wire (`spec/02` §6.1). Tie-break order is `Gradient → Median →
+Left → None`, mirroring the round-15/16 dense-kernel benchmark
+ordering (Gradient was both the fastest dense kernel AND most often
+the best compressor on natural content). The direct-API
+`encode_frame(EncodedFrame { predictor, .. })` path is unchanged —
+callers that hand in an explicit predictor get it verbatim. Round 18
+also adds `UtVideoEncoder::set_predictor(Some(Predictor::X))` as an
+override hook so callers that need to pin a specific predictor (or
+restore exact round-17 byte-equality) can do so without touching the
+direct API.
+
+New `tests/round18_predictor_heuristic.rs` (17 tests) plus 3 new
+`src/registry.rs` unit tests pin five invariant groups:
+
+- **Content-discrimination** — constant-plane → `None` (single-symbol
+  histogram, entropy 0); horizontal-stripes (`row = 7r mod 256`) →
+  `Left` or `Gradient` (both collapse to near-zero entropy under the
+  documented tie-break); 2D linear ramp (`r + c mod 256`) →
+  `Gradient` / `Median` / `Left` (the dense gradient predictor is
+  exact on row-plus-column patterns); xorshift32 noise → `None`
+  or `Left` (Gradient / Median both spread the histogram on
+  uncorrelated content).
+- **Determinism** — 20 repeated calls on identical input return the
+  same predictor (no float-hash / iteration-order regression); rows
+  past `HEURISTIC_SAMPLE_ROWS` cannot change the heuristic's choice
+  (sampling budget is fixed).
+- **Degenerate-input guard** — `width = 0` / `height = 0` returns the
+  documented `Gradient` fallback; `width = 1` / `height = 1` /
+  `height < HEURISTIC_SAMPLE_ROWS` don't panic and return one of
+  the four documented predictors.
+- **Trait-path round-trip with heuristic** — every FOURCC × content
+  pattern survives `encode_frame_via_trait → decode_frame_via_trait`
+  bit-exact (the heuristic-chosen predictor must be a valid
+  decoder input — `Predictor::Gradient`'s round-1 hand-crafted
+  decoder support is exercised here transparently via the trait).
+- **Non-regression on the entropy floor** — for every test fixture
+  the heuristic's choice produces full-frame entropy within
+  `0.5 bit/sample` of the four-way minimum (slack covers the
+  sampled-row vs. full-frame entropy gap), AND strictly beats
+  `Predictor::None` on Gradient-friendly content (regression guard
+  against the heuristic collapsing to "always None" or "always pick
+  the first candidate without computing entropy").
+
+The 3 new registry-module unit tests exercise `set_predictor` directly
+(no `Any`-downcasting on `Box<dyn Encoder>` today) by constructing a
+`UtVideoEncoder` through `build_encoder_config`, then asserting the
+encoded packet's trailing `frame_info` dword carries the correct
+predictor bits (8..9, `spec/02` §6.1) after pinning to
+`Predictor::Left`.
+
+**258 tests** (was 238, +20). Headline estimate unchanged at
+**decode ~97% / encode ~97%** — round 18 closes the trait-path
+predictor-policy gap on the existing encode surface (every frame now
+gets a content-appropriate predictor instead of a one-size-fits-all
+Gradient), not new bitstream capability. ULH*/HBD/Lite/interlaced
+remain blocked on out-of-corpus docs.
+
 **Round 17 — `Encoder` trait wiring from `CodecParameters` +
 end-to-end integration suite.** Round 14 closed the analogous gap on
 the decoder side: the registry `make_decoder` factory now derives the
