@@ -59,3 +59,23 @@ name = "encode_utvideo_frame"
 path = "fuzz_targets/encode_utvideo_frame.rs"
 test = false
 doc = false
+
+# Third fuzz target — decode-free frame-layout inspector
+# (`peek_frame` + `peek_frame_info`). Round 21 added a public inspector
+# module that walks the same per-frame byte layout the decoder walks
+# but without any Huffman decode or residual allocation; it surfaces
+# per-plane / per-slice byte extents to container indexers and
+# diagnostic tools. The inspector therefore exposes its own publicly-
+# reachable parser to attacker-controlled chunk bytes — distinct attack
+# surface from `decode_frame`, even though the two share the byte-walk
+# shape. The target asserts (a) panic-freedom on any input, (b)
+# containment: every reported offset / per-slice (start, end) lies
+# inside `[0, payload.len())`, and (c) inspector/decoder agreement on
+# the predictor + trailing `frame_info` dword whenever `decode_frame`
+# also succeeds — cross-validating the two parsers on attacker-shaped
+# bytes rather than only on synthesised tests.
+[[bin]]
+name = "inspect_utvideo"
+path = "fuzz_targets/inspect_utvideo.rs"
+test = false
+doc = false

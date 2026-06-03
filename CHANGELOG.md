@@ -8,6 +8,37 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 228 — fuzz coverage for the decode-free inspector.** Round 21
+  exposed the public `peek_frame_info` + `peek_frame` byte-walk as a
+  separate publicly-reachable parser of attacker-controlled chunk
+  bytes; round 228 wires a third cargo-fuzz target
+  (`fuzz/fuzz_targets/inspect_utvideo.rs`) that pins three properties:
+  (a) panic-freedom — both inspector entrypoints always return a
+  `Result`; (b) containment — every reported byte offset
+  (`descriptor_start`, `end_offsets_start`, `slice_data_start`,
+  per-slice `start` / `end`) lies inside `[0, payload.len())` and
+  respects `descriptor_start <= end_offsets_start <= slice_data_start
+  <= slice.start <= slice.end <= payload.len()`; (c) inspector /
+  decoder agreement — when `decode_frame` succeeds on the same
+  `(cfg, payload)`, `peek_frame` must also succeed AND the predictor +
+  trailing `frame_info` dword must match between the two parsers.
+  Header layout (`FOURCC mod 5 / width-seed / height-seed /
+  slice-seed`) matches `decode_utvideo` so corpus entries are
+  cross-useful.
+- **Round 228 — stable-CI mirror at
+  `tests/round228_inspect_fuzz_properties.rs` (9 tests).** Drives the
+  three fuzz properties on a deterministic seed corpus — empty input,
+  truncated-to-4-bytes-only-frame-info, 64-input xorshift sweep,
+  garbage appended after frame_info, three truncation regimes,
+  every length 0..=15 to `peek_frame_info`, every length 0..=299 to
+  `peek_frame` — so a regression surfaces in the regular `cargo test`
+  lane instead of waiting for the daily fuzz run. Plus a fourth
+  deterministic-only property: every `(FOURCC, predictor, num_slices)
+  ∈ {Ulrg, Ulra, Uly0, Uly2, Uly4} × {None, Left, Gradient, Median} ×
+  {1, 2, 4, 8}` (80 cells) round-trips
+  `encode_frame → peek_frame → decode_frame` and the inspector output
+  is checked field-by-field against the decoder output.
+
 - **Round 21 — decode-free frame-layout inspector (`inspect` module).**
   New public `peek_frame(cfg, chunk_payload) -> FrameLayout` and
   `peek_frame_info(chunk_payload) -> (u32, Predictor)` surface the

@@ -5,6 +5,57 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 228 — fuzz coverage for the decode-free inspector.** Round 21
+landed the public [`inspect`] module ([`peek_frame_info`] /
+[`peek_frame`]) — a Huffman-free byte-walk that surfaces the per-frame
+layout (descriptor offsets, slice-end-offset table position, per-slice
+`(start, end)` byte extents, trailing `frame_info` + predictor) for
+container indexers and diagnostic tools. The full decoder already
+shares fuzz coverage via `decode_utvideo`, but the inspector — as a
+**separate publicly-reachable parser** of attacker-controlled chunk
+bytes — had only synthesised tests. Round 228 closes the gap with a
+third cargo-fuzz target plus a stable-CI mirror that pins three
+properties:
+
+- **Panic-free inspector.** [`peek_frame_info`] and [`peek_frame`]
+  always return a `Result` on any input — no panic, no abort, no OOM —
+  regardless of how malformed the chunk payload or how degenerate the
+  synthesised [`StreamConfig`] is.
+- **Containment.** When [`peek_frame`] succeeds, every reported
+  byte offset (`descriptor_start`, `end_offsets_start`,
+  `slice_data_start`, every per-slice `start` / `end`) lies inside
+  `[0, chunk_payload.len())` and respects the documented ordering
+  `descriptor_start <= end_offsets_start <= slice_data_start` plus
+  `slice_data_start <= slice.start <= slice.end <= payload.len()`. A
+  caller indexing the returned ranges into the original buffer can
+  never read out of bounds.
+- **Inspector / decoder agreement.** When [`decode_frame`] succeeds on
+  the same `(cfg, payload)`, [`peek_frame`] must also succeed, and the
+  predictor + trailing `frame_info` dword must match between the two
+  parsers. Cross-validates the two byte walks on attacker-shaped bytes
+  rather than only on synthesised tests. (The reverse implication is
+  not asserted: the inspector skips Huffman validation, so a corrupt
+  Huffman descriptor / slice bit-stream can fail decode while the
+  inspector legitimately succeeds.)
+
+The new fuzz target `inspect_utvideo` lives next to the existing
+`decode_utvideo` + `encode_utvideo_frame` targets in `fuzz/`; the
+stable-CI mirror at `tests/round228_inspect_fuzz_properties.rs`
+(9 tests) drives the same three properties on a deterministic seed
+corpus so any regression surfaces in the regular `cargo test` lane
+rather than waiting for the daily fuzz run. The mirror also pins a
+fourth deterministic-only property the libFuzzer target can't easily
+enumerate: every `(FOURCC, predictor, num_slices) ∈ {Ulrg, Ulra, Uly0,
+Uly2, Uly4} × {None, Left, Gradient, Median} × {1, 2, 4, 8}` (80 cells)
+is round-tripped `encode_frame → peek_frame → decode_frame` and the
+inspector output is checked field-by-field against the decoder output.
+
+**292 tests** (was 283, +9). Headline estimate unchanged at
+**decode ~97% / encode ~97%** — round 228 closes the fuzz-coverage
+gap on the existing decode-free inspector surface, not new bitstream
+capability. ULH*/HBD/Lite/interlaced remain blocked on out-of-corpus
+docs.
+
 **Round 21 — decode-free frame-layout inspector (`inspect` module).**
 The full decoder ([`decode_frame`]) walks the per-frame chunk-payload
 plane-by-plane (256-byte Huffman descriptor → slice-end-offset table
