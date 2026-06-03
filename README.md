@@ -5,6 +5,92 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 21 — decode-free frame-layout inspector (`inspect` module).**
+The full decoder ([`decode_frame`]) walks the per-frame chunk-payload
+plane-by-plane (256-byte Huffman descriptor → slice-end-offset table
+→ slice bit-streams → trailing 4-byte `frame_info` dword) before
+kicking off the Huffman + inverse-predict passes; it surfaces the
+trailing dword on the [`DecodedFrame`] output but consumes the
+per-plane byte offsets internally. A container-side indexer or
+diagnostic tool that wants those offsets has had to re-implement the
+byte walk. Round 21 closes the gap with a public
+[`inspect`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs)
+module exposing two endpoints:
+
+- [`peek_frame_info`] — short-path peek at the trailing 4 bytes,
+  returns `(frame_info, predictor)` with bounds-check rejection of
+  buffers shorter than 4 bytes (`Error::MissingFrameInfo`).
+- [`peek_frame`] — full decode-free walk that returns a
+  [`FrameLayout`] carrying per-plane [`PlaneLayout`]s. Each
+  `PlaneLayout` exposes `descriptor_start` / `end_offsets_start` /
+  `slice_data_start` absolute byte offsets within the chunk payload,
+  a `Vec<SliceLayout>` of per-slice `(start, end)` ranges, and an
+  `is_single_symbol` flag derived from the `spec/05` §6.1
+  descriptor-sentinel pattern (exactly one entry is 0, every other
+  byte is 255). Convenience accessors: `FrameLayout::total_size`
+  / `total_slice_data_bytes`, `PlaneLayout::total_size` /
+  `slice_data_total`, `SliceLayout::len` / `is_empty`.
+
+The inspector runs the same parse rules the full decoder uses
+(monotonic non-decreasing slice-end offsets per `spec/02` §5;
+4-byte word alignment of every slice-end value per `spec/05` §4.1;
+the total-length identity `payload_len = Σ plane_size + 4`) and
+surfaces the same `Error` variants
+(`MissingFrameInfo`, `ChunkTooShort`, `NonMonotonicSliceOffsets`,
+`SliceNotWordAligned`, `InvalidSliceCount`,
+`MultipleSingleSymbolSentinels`, `KraftViolation`) at the same point
+in the walk. No Huffman table is built; no residual buffer is
+allocated. Complexity is `O(plane_count * num_slices)`.
+
+Use cases:
+
+- **Container indexers** that want `(predictor, slice_count,
+  per_plane_compressed_size)` per frame in a clip to drive bit-budget
+  planning, without paying the per-pixel Huffman-decode cost.
+- **Diagnostic tools** pointing at "which plane carries the most
+  compressed bytes" / "is plane k single-symbol" / "which slice is
+  empty" on a per-frame basis.
+- **Test harnesses** pinning wire-format invariants without
+  re-implementing the byte walk.
+
+New `tests/round21_inspect_frame_layout.rs` (14 tests) plus 11 new
+`src/inspect.rs` unit tests pin seven invariant groups:
+
+- **Cross-validation against the full decoder** — every FOURCC ×
+  predictor: `peek_frame.predictor == decode_frame.predictor` and
+  `peek_frame.frame_info == decode_frame.frame_info`.
+- **Per-slice extent correctness** — for every FOURCC × `num_slices
+  ∈ {1, 2, 4, 8}`: per-slice `(start, end)` ranges are contiguous
+  within a plane (`slice_n.end == slice_{n+1}.start`); the first
+  slice starts at `slice_data_start`; every slice end is 4-byte
+  word-aligned relative to `slice_data_start`.
+- **Total-size identity** — `Σ plane_total_size + 4 == chunk_payload.len()`
+  for every FOURCC × `num_slices ∈ {1, 2, 4, 8}`.
+- **Empty-slice edge case** — `num_slices > plane_height` collapses
+  some slices to zero rows; those slices surface as `SliceLayout`s
+  with `start == end` and `is_empty() == true` (`spec/02` §5.1).
+- **Single-symbol descriptor detection** — constant content under
+  `Predictor::None` produces a single-symbol descriptor per
+  `spec/05` §6.1; `is_single_symbol` is set, `slice_data_total()`
+  is 0, and `total_size()` matches the bound
+  `plane_count × (256 + 4 × num_slices) + 4`.
+- **Diagnostic error surfacing** — corrupt slice-end offsets (zeroed
+  third entry → non-monotonic) and bumped-by-one entries (no longer
+  word-aligned) surface as `NonMonotonicSliceOffsets` and
+  `SliceNotWordAligned` respectively, at the same point in the walk
+  the full decoder would reject them. Short buffers surface as
+  `MissingFrameInfo` / `ChunkTooShort`.
+- **Determinism** — 20 repeated calls on the same `(cfg, payload)`
+  return identical `FrameLayout`s.
+
+**283 tests** (was 258, +25). Headline estimate unchanged at
+**decode ~97% / encode ~97%** — round 21 closes the decode-free
+inspector gap on the existing decode surface (containers / indexers
+get a public path into the per-frame byte layout that previously
+required either re-implementing the byte walk or running the full
+decode), not new bitstream capability. ULH*/HBD/Lite/interlaced
+remain blocked on out-of-corpus docs.
+
 **Round 18 — content-adaptive trait-path predictor heuristic.** Round
 17 wired the `oxideav_core::Encoder` trait path with a hardcoded
 `Predictor::Gradient` for every frame: callers driving the codec

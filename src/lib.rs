@@ -48,6 +48,7 @@ pub mod encoder;
 pub mod error;
 pub mod fourcc;
 pub mod huffman;
+pub mod inspect;
 pub mod predict;
 #[cfg(feature = "registry")]
 pub mod registry;
@@ -58,6 +59,7 @@ pub use crate::decoder::{decode_frame, DecodedFrame, DecodedPlane, PlaneLabel};
 pub use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
 pub use crate::error::{Error, ErrorCategory, Result};
 pub use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
+pub use crate::inspect::{peek_frame, peek_frame_info, FrameLayout, PlaneLayout, SliceLayout};
 
 // Framework integration — only when the `registry` feature is on.
 #[cfg(feature = "registry")]

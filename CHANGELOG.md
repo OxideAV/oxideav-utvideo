@@ -6,6 +6,37 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Round 21 — decode-free frame-layout inspector (`inspect` module).**
+  New public `peek_frame(cfg, chunk_payload) -> FrameLayout` and
+  `peek_frame_info(chunk_payload) -> (u32, Predictor)` surface the
+  per-frame byte layout without running any Huffman decode or
+  allocating a residual buffer. `FrameLayout` carries per-plane
+  byte extents (`descriptor_start`, `end_offsets_start`,
+  `slice_data_start`, plus a `Vec<SliceLayout>` of per-slice
+  `(start, end)` ranges), an `is_single_symbol` flag derived from
+  the `spec/05` §6.1 descriptor-sentinel pattern, the trailing
+  `frame_info` dword, and the predictor decoded from bits 8..9.
+  Convenience accessors: `FrameLayout::total_size()` /
+  `total_slice_data_bytes()`, `PlaneLayout::total_size()` /
+  `slice_data_total()`, `SliceLayout::len()` / `is_empty()`. The
+  inspector applies the same parse rules the full decoder uses
+  (monotonic slice-end offsets, 4-byte word alignment per
+  `spec/05` §4.1, total-length identity `payload = Σ plane_size + 4`)
+  and surfaces the same `Error` variants
+  (`MissingFrameInfo`, `ChunkTooShort`, `NonMonotonicSliceOffsets`,
+  `SliceNotWordAligned`, `InvalidSliceCount`,
+  `MultipleSingleSymbolSentinels`, `KraftViolation`) at the same
+  point in the walk. Complexity is `O(plane_count * num_slices)`.
+  Use cases: container-side indexers that want
+  `(predictor, slice_count, per_plane_compressed_size)` per frame
+  without the Huffman-decode cost; diagnostic tools that want
+  per-plane byte extents on a corrupt frame; test harnesses pinning
+  wire-format invariants.
+- `inspect::{FrameLayout, PlaneLayout, SliceLayout, peek_frame,
+  peek_frame_info}` — re-exported from crate root.
+
 ### Changed
 
 - **Round 18 — content-adaptive trait-path predictor heuristic.**
