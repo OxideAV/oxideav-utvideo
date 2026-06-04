@@ -5,6 +5,58 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 232 — direct Huffman-layer fuzz coverage.** The existing three
+cargo-fuzz targets (`decode_utvideo` / `encode_utvideo_frame` /
+`inspect_utvideo`) reach the per-plane Huffman codebook builder and
+slice bit-stream decoder only after the per-frame byte walk
+(`spec/02` §§4, 5) has accepted the chunk shape. On random bytes the
+byte walk rejects long before the Huffman layer runs, so the inner
+attack surface — Kraft check, canonical code assignment, LUT build,
+LUT fast-path / length-tier slow-path fallback, `BitReader` /
+`BitWriter` word-aligned tail handling — gets a tiny share of
+fuzz-budget iterations. Round 232 adds a fourth cargo-fuzz target,
+[`huffman_codec`](https://github.com/OxideAV/oxideav-utvideo/blob/master/fuzz/fuzz_targets/huffman_codec.rs),
+that feeds a 256-byte descriptor + slice-data tail straight into
+[`huffman::HuffmanTable::build`] and [`huffman::HuffmanTable::decode_slice`]
+below the byte walk, pinning three properties on every input:
+
+- **Panic-free build.** [`HuffmanTable::build`] always returns a
+  `Result` on any 256-byte descriptor — no panic, no abort, no
+  overflow, no OOM. Structural defects surface as typed errors
+  (`KraftViolation`, `MultipleSingleSymbolSentinels`,
+  `Error::InvalidInput`).
+- **Panic-free `decode_slice`.** When `build` succeeds, calling
+  [`HuffmanTable::decode_slice`] with any `(slice_data, n_pixels)`
+  pair returns a `Result`. The bit reader's word-aligned fast path,
+  the LUT lookup, and the length-tier slow-path fallback all hold the
+  panic-freedom contract; malformed inputs surface as
+  `Error::SliceTruncated` or `Error::HuffmanDecodeFailure`.
+- **Bit-pack / bit-unpack roundtrip.** On a synthesised
+  Kraft-valid uniform-length-`k` descriptor (active alphabet `2^k`,
+  the rest sentinel-padded), a fuzz-derived symbol sequence is
+  bit-packed through [`huffman::BitWriter::write_code`] and decoded
+  back via [`huffman::HuffmanTable::decode_slice`]; the decoded
+  symbols must equal the input bit-exactly. This pins the
+  `BitWriter` / `BitReader` symmetry below the frame layer, where a
+  1-bit-offset overflow would otherwise show up only when the full
+  encode / decode loop happens to mis-align by chance.
+
+A 100,000-iteration smoke run of the new libFuzzer target finds zero
+crashes; the stable-CI mirror at
+[`tests/round232_huffman_codec_fuzz_properties.rs`](https://github.com/OxideAV/oxideav-utvideo/blob/master/tests/round232_huffman_codec_fuzz_properties.rs)
+(9 tests) drives the same three properties on a deterministic seed
+corpus plus two deterministic-only enumeration properties the
+libFuzzer target can't easily reach: every single-symbol descriptor
+`sym ∈ 0..=255` is round-tripped through
+`decode_slice(&[], n_pixels)` and asserts the table emits `n_pixels`
+copies of `sym`; every "two-zero-sentinel" descriptor pair is
+checked for the `MultipleSingleSymbolSentinels` rejection.
+
+**301 tests** (was 292, +9). Headline estimate unchanged at
+**decode ~97% / encode ~97%** — round 232 closes a fuzz-coverage
+gap on an existing public Huffman API, not new bitstream capability.
+ULH\*/HBD/Lite/interlaced remain blocked on out-of-corpus docs.
+
 **Round 228 — fuzz coverage for the decode-free inspector.** Round 21
 landed the public [`inspect`] module ([`peek_frame_info`] /
 [`peek_frame`]) — a Huffman-free byte-walk that surfaces the per-frame

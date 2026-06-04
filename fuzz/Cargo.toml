@@ -79,3 +79,23 @@ name = "inspect_utvideo"
 path = "fuzz_targets/inspect_utvideo.rs"
 test = false
 doc = false
+
+# Fourth fuzz target — direct Huffman codebook + slice bit-stream
+# coverage below the per-frame byte walk. The decoder fuzz target
+# reaches `HuffmanTable::build` + `decode_slice` only after the byte
+# walk (`spec/02` §§4, 5) has accepted the chunk shape; on random
+# bytes the walk rejects long before the Huffman layer runs, so the
+# inner attack surface (Kraft check, canonical code assignment, LUT
+# build, fast-path/slow-path decode, bit-reader tail) gets a tiny
+# share of fuzz-budget iterations. This target feeds a 256-byte
+# descriptor + slice tail straight into `HuffmanTable::build` /
+# `decode_slice`, pinning (a) panic-freedom on any descriptor, (b)
+# panic-freedom on any `(slice_data, n_pixels)` against a built
+# table, and (c) on a synthesised Kraft-valid descriptor the
+# `BitWriter` → `BitReader` encode/decode roundtrip preserves the
+# input symbol sequence bit-exactly.
+[[bin]]
+name = "huffman_codec"
+path = "fuzz_targets/huffman_codec.rs"
+test = false
+doc = false

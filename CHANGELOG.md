@@ -8,6 +8,38 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 232 — direct Huffman-layer fuzz coverage.** The existing
+  three cargo-fuzz targets (`decode_utvideo` / `encode_utvideo_frame`
+  / `inspect_utvideo`) reach `HuffmanTable::build` + `decode_slice`
+  only after the per-frame byte walk (`spec/02` §§4, 5) has accepted
+  the chunk shape; on random bytes the walk rejects long before the
+  Huffman layer runs. Round 232 adds a fourth cargo-fuzz target
+  (`fuzz/fuzz_targets/huffman_codec.rs`) feeding a 256-byte descriptor
+  + slice tail straight into `HuffmanTable::build` /
+  `HuffmanTable::decode_slice` below the byte walk. Three properties
+  are pinned on every input: (a) panic-freedom — `build` returns a
+  `Result` on any 256-byte descriptor; (b) panic-freedom —
+  `decode_slice` returns a `Result` on any
+  `(slice_data, n_pixels)` against a built table; (c) on a
+  synthesised Kraft-valid descriptor (uniform-length-`k` over `2^k`
+  active symbols), a fuzz-derived symbol sequence encoded via
+  `BitWriter::write_code(code_for(sym))` and decoded via
+  `decode_slice` recovers the input bit-exactly. A 100,000-iteration
+  libFuzzer smoke run found zero crashes.
+- **Round 232 — stable-CI mirror at
+  `tests/round232_huffman_codec_fuzz_properties.rs` (9 tests).**
+  Drives the three fuzz properties on a deterministic seed corpus —
+  empty input, all-zero descriptor, all-sentinel descriptor, 64-input
+  xorshift sweep, truncated slice tails of length 0..=128, every
+  uniform-length-`k` descriptor for `k ∈ 1..=8`, a skewed two-symbol
+  roundtrip — so a regression surfaces in the regular `cargo test`
+  lane instead of waiting for the daily fuzz run. Plus two
+  deterministic-only enumeration properties the libFuzzer target
+  can't easily reach: every single-symbol descriptor `sym ∈ 0..=255`
+  round-trips through `decode_slice(&[], n_pixels)` correctly, and
+  every "two-zero-sentinel" descriptor pair is checked for the
+  `MultipleSingleSymbolSentinels` rejection.
+
 - **Round 228 — fuzz coverage for the decode-free inspector.** Round 21
   exposed the public `peek_frame_info` + `peek_frame` byte-walk as a
   separate publicly-reachable parser of attacker-controlled chunk
