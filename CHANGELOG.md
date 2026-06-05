@@ -8,6 +8,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 238 — per-slice predictor microbench
+  (`benches/predict_slice.rs`).** Adds the fifth criterion bench,
+  isolating the per-slice spatial-predictor primitives
+  `predict::apply_slice` (inverse) and `predict::forward_slice`
+  (forward) — the four-mode branch (None / Left / Gradient / Median)
+  over a single slice's row strip with the universal `+128`
+  first-pixel seed (`spec/04` §§3, 4, 7, 5) — that the existing
+  `decode` / `encode` full-frame benches observe only inside the
+  full pipeline. Three groups: `predict_inverse_slice`,
+  `predict_forward_slice`, `predict_choose_predictor`, each over
+  `Predictor × (w, rows) ∈ {(64, 64), (256, 256), (1920, 1080)} ×
+  {natural, flat}`. Per-byte throughput pinned on the 1080p natural
+  axis: inverse None ~72 GiB/s, Left ~3.6 GiB/s, Gradient ~1.5 GiB/s,
+  Median ~533 MiB/s; forward None ~74 GiB/s, Left ~54 GiB/s, Gradient
+  ~28 GiB/s, Median ~1.75 GiB/s — exposes the per-slice
+  serial-cumulative dependency in `apply_*` as a separate axis from
+  the full-pipeline number and identifies Median as the
+  profile-guided next-step target. No public API change; no new
+  test (bench-only addition); test count unchanged at 301.
+
 - **Round 232 — direct Huffman-layer fuzz coverage.** The existing
   three cargo-fuzz targets (`decode_utvideo` / `encode_utvideo_frame`
   / `inspect_utvideo`) reach `HuffmanTable::build` + `decode_slice`

@@ -5,6 +5,51 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 238 — per-slice predictor microbenches.** The four
+benches that shipped through round 11 (`decode` / `encode` full-frame,
+`huffman_lut` decode kernel, `rgb_decorrelate` inter-plane transform)
+covered the dominant pipeline costs but skipped the per-slice
+spatial-predictor primitives `predict::apply_slice` (inverse) and
+`predict::forward_slice` (forward) — the four-mode branch
+(None / Left / Gradient / Median) over a single slice's row strip
+with the universal `+128` first-pixel seed (`spec/04` §§3, 4, 7, 5).
+The full-frame benches observe those costs only inside a much larger
+pipeline (Huffman + RGB decorrelate + plane fan-out + allocator);
+round 238 adds a fifth bench,
+[`predict_slice`](https://github.com/OxideAV/oxideav-utvideo/blob/master/benches/predict_slice.rs),
+that isolates the per-slice kernel across `Predictor × (w, rows) ×
+{natural, flat}`:
+
+- **`predict_inverse_slice`** — `apply_slice` on a `(64, 64)`,
+  `(256, 256)`, and `(1920, 1080)` strip for each of the four
+  predictors. The "natural" shape uses the gradient-plus-xorshift
+  pattern shared with the `decode` / `encode` benches; the "flat"
+  shape (constant `0x80`) collapses the inverse kernel to the
+  degenerate cumulative path and pins the lower bound.
+- **`predict_forward_slice`** — the encoder mirror over the same
+  matrix.
+- **`predict_choose_predictor`** — the round-18 content-adaptive
+  heuristic over the same shapes; the per-plane sampling cost is
+  constant in `plane_height` and linear in `width`.
+
+Headline 1080p single-thread numbers on the dev workstation, natural
+content:
+
+| Path    | None       | Left       | Gradient   | Median     |
+| ------- | ---------- | ---------- | ---------- | ---------- |
+| inverse | ~72 GiB/s  | ~3.6 GiB/s | ~1.5 GiB/s | ~533 MiB/s |
+| forward | ~74 GiB/s  | ~54 GiB/s  | ~28 GiB/s  | ~1.75 GiB/s |
+
+The asymmetry between forward and inverse on Left / Gradient / Median
+makes the per-slice serial-cumulative dependency in `apply_*` visible
+on its own axis for the first time, and lights up Median (interior
+`median(A, B, (A+B-C) mod 256)` per `spec/04` §5) as the obvious
+profile-guided next-step target — distinct from any decoder cost the
+full-pipeline bench had folded into a single number. Test count
+unchanged at 301; no public API change. Headline estimate unchanged at
+**decode ~97% / encode ~97%** — round 238 adds measurement of
+existing kernels, not new bitstream capability.
+
 **Round 232 — direct Huffman-layer fuzz coverage.** The existing three
 cargo-fuzz targets (`decode_utvideo` / `encode_utvideo_frame` /
 `inspect_utvideo`) reach the per-plane Huffman codebook builder and

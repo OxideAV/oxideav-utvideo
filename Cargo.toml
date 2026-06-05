@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "rgb_decorrelate"
 harness = false
+
+[[bench]]
+name = "predict_slice"
+harness = false
