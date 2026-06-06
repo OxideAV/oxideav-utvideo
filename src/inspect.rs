@@ -159,6 +159,31 @@ pub struct PlaneLayout {
     /// other code-lengths are 255). `spec/05` §6.1. The plane carries
     /// zero slice-data bytes when this is true.
     pub is_single_symbol: bool,
+    /// Decode-free count of symbols carrying an explicit code length
+    /// in this plane's 256-byte descriptor — i.e. the count of
+    /// `code_length[s]` entries with value in the active range
+    /// `1..=254` per `spec/05` §2.1 (entries with value `0` are the
+    /// single-symbol sentinel from `spec/05` §6.1, entries with value
+    /// `255` are the unused-symbol sentinel from `spec/05` §2.1).
+    ///
+    /// Range: `0..=256`. Two well-formed shapes the decoder accepts:
+    ///
+    /// - `0` — paired with `is_single_symbol == true`, the plane
+    ///   carries a single repeated symbol and `slice_data_total == 0`
+    ///   (`spec/05` §6.1). The lone `code_length[s] == 0` entry is
+    ///   the sentinel, NOT counted as an active code.
+    /// - `2..=256` — the plane has a multi-symbol canonical Huffman
+    ///   codebook satisfying the Kraft equality
+    ///   `Σ 2^(-code_length[s]) == 1` over the active set
+    ///   (`spec/05` §2.1 + §2.2).
+    ///
+    /// `1` is structurally rejectable at build time (a single
+    /// non-sentinel length cannot satisfy Kraft equality on a
+    /// non-trivial alphabet, `spec/05` §2.2), but `peek_frame`
+    /// remains a decode-free byte-walk and surfaces the raw count
+    /// here — `HuffmanTable::build` is what enforces Kraft
+    /// (`spec/05` §2.2 step 3, surfaced as `Error::KraftViolation`).
+    pub active_symbol_count: u32,
 }
 
 impl PlaneLayout {
@@ -192,6 +217,23 @@ impl PlaneLayout {
     /// header-derived plane size before any Huffman pass runs.
     pub fn total_pixels(&self) -> u64 {
         self.slices.iter().map(|s| u64::from(s.pixel_count)).sum()
+    }
+
+    /// Number of bits in the unused-symbol set: `256 -
+    /// active_symbol_count - 1` when [`is_single_symbol`] is true,
+    /// `256 - active_symbol_count` otherwise. Mirrors the count of
+    /// `code_length[s] == 255` sentinel entries in the descriptor
+    /// per `spec/05` §2.1 (the "symbol unused, no code is assigned"
+    /// bullet). Useful as a typed cross-check: an entropy-coding
+    /// audit can confirm
+    /// `active_symbol_count + unused_symbol_count + (single? 1 : 0)
+    /// == 256` against the on-wire descriptor without a second pass
+    /// over the byte slice.
+    ///
+    /// [`is_single_symbol`]: PlaneLayout::is_single_symbol
+    pub fn unused_symbol_count(&self) -> u32 {
+        let single = if self.is_single_symbol { 1 } else { 0 };
+        256 - self.active_symbol_count - single
     }
 }
 
@@ -309,6 +351,13 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
         let zero_count = descriptor.iter().filter(|&&b| b == 0).count();
         let unused_count = descriptor.iter().filter(|&&b| b == 255).count();
         let is_single_symbol = zero_count == 1 && unused_count == 255;
+        // Active-symbol count per spec/05 §2.1: entries with value
+        // in the range 1..=254 carry an explicit code length and
+        // join the canonical-Huffman alphabet. The complement
+        // (zero_count + unused_count) covers both sentinels;
+        // descriptor.len() is constant 256, so the subtraction is
+        // well-defined and produces a u32-friendly value in 0..=256.
+        let active_symbol_count = (256 - zero_count - unused_count) as u32;
 
         // Slice-end-offsets table.
         let end_offsets_start = offset;
@@ -394,6 +443,7 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
             slice_data_start,
             slices,
             is_single_symbol,
+            active_symbol_count,
         });
     }
 

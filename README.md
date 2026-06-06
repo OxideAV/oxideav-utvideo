@@ -5,6 +5,91 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 244 — typed `active_symbol_count` accessor on
+[`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs).**
+The decode-free `peek_frame` path that ships through round 21 +
+round 241 already surfaces two semantic typed primitives per plane
+— `is_single_symbol` (round 21, the `spec/05` §6.1 sentinel flag)
+and the per-slice `row_start` / `row_end` / `pixel_count`
+partitioning (round 241, `spec/02` §5.2). Round 244 extends the
+decode-free typed surface with a third primitive: the per-plane
+count of symbols carrying an explicit code length in the on-wire
+256-byte Huffman descriptor (`spec/02` §4 + `spec/05` §2.1: the
+"active range" `1..=254`).
+
+```rust
+pub struct PlaneLayout {
+    // unchanged fields...
+    pub is_single_symbol: bool,
+    // NEW — decode-free count of code_length[s] entries in 1..=254
+    // per `spec/05` §2.1. Range 0..=256.
+    pub active_symbol_count: u32,
+}
+
+impl PlaneLayout {
+    /// NEW — count of `code_length[s] == 255` sentinel entries.
+    /// Typed identity: active + unused + (single ? 1 : 0) == 256.
+    pub fn unused_symbol_count(&self) -> u32 { /* ... */ }
+}
+```
+
+The new field is populated by `peek_frame` in the same descriptor
+pass that already computes `is_single_symbol` — the existing 256-byte
+descriptor slice is folded over once to yield both flags
+simultaneously, keeping the inspector's `O(plane_count *
+num_slices)` complexity intact. Two well-formed shapes the wire
+format permits per `spec/05` §§2.1, 2.2, 6.1:
+
+- `active_symbol_count == 0` paired with `is_single_symbol == true`
+  — the lone `code_length[s] == 0` entry from `spec/05` §6.1 is the
+  single-symbol sentinel and is NOT itself counted as an active
+  code. The plane carries `slice_data_total == 0` bytes.
+- `active_symbol_count` in `2..=256` — a multi-symbol canonical
+  Huffman codebook satisfying Kraft equality on the active set
+  (`spec/05` §2.2 step 3). `HuffmanTable::build` enforces Kraft;
+  `peek_frame` stays a byte-walk and surfaces the raw count.
+
+`PlaneLayout::unused_symbol_count()` returns the count of
+`code_length[s] == 255` sentinel entries from `spec/05` §2.1 so
+the typed identity `active + unused + (single ? 1 : 0) == 256` is
+a one-liner cross-check against the fixed 256-byte descriptor.
+
+The new field is additive on a `Vec`-carrying struct (`PlaneLayout`
+keeps its `Debug` / `Clone` / `PartialEq` / `Eq` derives); existing
+callers reading only the byte-offset / `slices` fields see no
+behavioural change.
+
+Pinned by six dedicated tests in
+[`tests/round244_active_symbol_count.rs`](https://github.com/OxideAV/oxideav-utvideo/blob/master/tests/round244_active_symbol_count.rs):
+
+- **`single_symbol_plane_reports_zero_active_symbols`** — a
+  constant-content frame + `Predictor::None` drives the `spec/05`
+  §6.1 single-symbol path on every plane, and the active count
+  goes to 0 (the sentinel is NOT counted).
+- **`high_entropy_plane_reports_at_least_two_active_symbols`** —
+  xorshift-driven content across every FOURCC
+  (`Ulrg` / `Ulra` / `Uly0` / `Uly2` / `Uly4`) produces multi-symbol
+  Kraft codebooks; the active count is in `2..=256`.
+- **`active_plus_unused_plus_single_equals_256`** — the descriptor
+  byte alphabet partitions into three classes per `spec/05` §2.1 +
+  §6.1; their counts must sum to 256 on every well-formed plane.
+- **`single_symbol_predictor_iff_zero_active_count_for_constant_planes`**
+  — typed biconditional: a constant-content plane is single-symbol
+  iff the active count is 0.
+- **`active_symbol_count_matches_descriptor_byte_scan`** — the
+  field equals an independent re-scan of the descriptor bytes via
+  the reported `descriptor_start` offset (`spec/02` §4): exactly
+  the count of bytes in `1..=254`.
+- **`unused_symbol_count_matches_255_byte_scan`** — the convenience
+  method's return value equals the count of descriptor bytes equal
+  to the `255` sentinel.
+
+Test count: **313** (was 307, +6). No public API removal; only
+additive field growth on `PlaneLayout` and one new convenience
+method. Headline estimate unchanged at **decode ~97% / encode
+~97%** — the round surfaces existing descriptor-byte semantics
+through a typed accessor, not new bitstream capability.
+
 **Round 241 — typed slice-header row accessor.** The decode-free
 `peek_frame` path that ships through round 21 +
 [`inspect::SliceLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs)

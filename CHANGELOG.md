@@ -8,6 +8,48 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 244 — typed `active_symbol_count` accessor on
+  `inspect::PlaneLayout`.** Extends the decode-free per-frame
+  layout with a third decode-free typed semantic field — the count
+  of symbols carrying an explicit code length in this plane's
+  256-byte Huffman descriptor (`spec/02` §4 + `spec/05` §2.1:
+  entries in the active range `1..=254`). Joins the existing
+  `is_single_symbol` flag (round 21) and the row-range / pixel-count
+  fields on `SliceLayout` (round 241), giving a container indexer
+  the third pre-decode diagnostic primitive — "how many active
+  symbols does this plane's codebook carry?" — without standing up
+  a `HuffmanTable` or allocating a residual buffer. Two
+  well-formed shapes the wire format permits per `spec/05`: `0`
+  active symbols paired with `is_single_symbol == true` (the lone
+  `code_length[s] == 0` entry from `spec/05` §6.1 is NOT itself an
+  active code), and `2..=256` active symbols on a Kraft-satisfying
+  multi-symbol canonical codebook (`spec/05` §2.2 step 3). Populated
+  by `peek_frame` in the same descriptor pass that already computes
+  `is_single_symbol` — the existing 256-byte descriptor slice is
+  folded over once to yield both flags simultaneously, keeping the
+  inspector's `O(plane_count * num_slices)` complexity intact. A
+  companion
+  `PlaneLayout::unused_symbol_count()` convenience method surfaces
+  the `code_length[s] == 255` sentinel count from `spec/05` §2.1
+  so the typed identity `active + unused + (single ? 1 : 0) == 256`
+  is a one-liner cross-check. The new field is additive on a
+  `Vec`-carrying struct (`PlaneLayout` keeps `Debug` / `Clone` /
+  `PartialEq` / `Eq` derives); existing callers reading only the
+  byte-offset fields see no behavioural change. Six dedicated tests
+  (`tests/round244_active_symbol_count.rs`) pin (a) the
+  single-symbol → zero-active-count case, (b) high-entropy → `>= 2`
+  active across every FOURCC + every multi-slice configuration,
+  (c) the partition identity across mixed-entropy + single-symbol
+  cases, (d) the typed biconditional `is_single_symbol ⇔
+  active_symbol_count == 0` on constant-content frames, (e) the
+  decode-free re-scan equivalence against the on-wire descriptor
+  byte slice via `descriptor_start`, and (f) the
+  `unused_symbol_count()` re-scan against the `0xff` byte count.
+  Headline estimate unchanged at **decode ~97% / encode ~97%** —
+  round 244 surfaces existing descriptor-byte semantics through a
+  typed accessor, not new bitstream capability. Test count: 313
+  (was 307, +6).
+
 - **Round 241 — typed slice-header row accessor on
   `inspect::SliceLayout`.** Extends the decode-free per-frame layout
   with the partitioning fields the wiki formula
