@@ -49,20 +49,55 @@
 use crate::error::{Error, Result};
 use crate::fourcc::{Predictor, StreamConfig};
 
-/// One slice's wire-format byte extent within the chunk payload.
+/// One slice's wire-format byte extent within the chunk payload,
+/// plus the typed slice-header fields the partitioning rule
+/// (`spec/02` §5.2) derives from `(plane_height, num_slices,
+/// slice_index)` alone.
 ///
-/// `start` and `end` are offsets relative to the chunk payload's
-/// byte 0 (i.e. usable as `chunk_payload[layout.start..layout.end]`).
+/// The two layers are independent (`spec/02` §5.2 final paragraph):
+/// `start` / `end` carry the **compressed-byte** range pulled
+/// straight from the per-plane `slice_end_offsets` table, while
+/// `row_start` / `row_end` / `pixel_count` carry the **decoded-pixel**
+/// extent computed from the wiki partitioning formula. Both layers
+/// are decode-free — no Huffman state is needed to populate either —
+/// but they answer different questions ("which bytes carry this
+/// slice's bit-stream?" vs. "which plane rows does this slice
+/// produce, and how many residual symbols will the Huffman pass
+/// emit?").
+///
 /// `start <= end` always. A zero-length slice (`start == end`) is
 /// legal — it arises when `num_slices > plane_height` and the
 /// per-slice `floor(ph*(s+1)/N) - floor(ph*s/N)` row count collapses
 /// to zero rows (`spec/02` §5.1 — empty bit-stream allowed).
+///
+/// `row_start <= row_end <= plane_height` always. `pixel_count` is
+/// `(row_end - row_start) * plane_width` per the
+/// `decode_slice_residuals(n_pixels)` argument shape in `spec/05`
+/// §6 (the per-slice Huffman pass emits exactly `pixel_count`
+/// residual bytes, including the trailing pad bits the bit reader
+/// consumes from the word-aligned slice tail per `spec/05` §4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceLayout {
     /// Absolute byte offset of this slice's first bit-stream byte.
     pub start: usize,
     /// Absolute byte offset just past this slice's last bit-stream byte.
     pub end: usize,
+    /// First plane row this slice produces (inclusive), per the
+    /// `spec/02` §5.2 partitioning rule
+    /// `row_start = floor((plane_height * slice_index) / num_slices)`.
+    pub row_start: u32,
+    /// One past the last plane row this slice produces, per the
+    /// `spec/02` §5.2 partitioning rule
+    /// `row_end = floor((plane_height * (slice_index + 1)) / num_slices)`.
+    /// Equal to `row_start` for empty slices
+    /// (`num_slices > plane_height`).
+    pub row_end: u32,
+    /// Number of residual symbols this slice's Huffman pass emits:
+    /// `(row_end - row_start) * plane_width`. Matches the
+    /// `n_pixels` argument shape of
+    /// [`crate::huffman::HuffmanTable::decode_slice`] (`spec/05` §6,
+    /// behavioural pseudocode).
+    pub pixel_count: u32,
 }
 
 impl SliceLayout {
@@ -77,6 +112,13 @@ impl SliceLayout {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.start == self.end
+    }
+
+    /// Number of plane rows this slice produces: `row_end - row_start`.
+    /// Equal to `pixel_count / plane_width` when `plane_width > 0`.
+    #[inline]
+    pub fn row_count(&self) -> u32 {
+        self.row_end - self.row_start
     }
 }
 
@@ -139,6 +181,17 @@ impl PlaneLayout {
             .last()
             .map(|s| s.end.saturating_sub(self.slice_data_start))
             .unwrap_or(0)
+    }
+
+    /// Total residual-symbol count across every slice of this plane.
+    /// Equal to `width * height` for any well-formed
+    /// [`PlaneLayout`] — the per-slice partitioning rule
+    /// (`spec/02` §5.2) covers `[0, plane_height)` with no overlap
+    /// and no gap, so `Σ slice.pixel_count == plane_width *
+    /// plane_height`. Useful as a typed cross-check against the
+    /// header-derived plane size before any Huffman pass runs.
+    pub fn total_pixels(&self) -> u64 {
+        self.slices.iter().map(|s| u64::from(s.pixel_count)).sum()
     }
 }
 
@@ -302,13 +355,31 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
             });
         }
 
-        // Build per-slice absolute extents.
+        // Build per-slice absolute extents + decode-free row range
+        // per `spec/02` §5.2:
+        //   row_start[s] = floor((plane_height * s) / num_slices)
+        //   row_end[s]   = floor((plane_height * (s + 1)) / num_slices)
+        // The product `plane_height * num_slices` fits in u64 in every
+        // reachable case (plane_height capped by `Hp <= 65535 *
+        // chroma-step` per `spec/01` §4.4.1, num_slices `<= 256` per
+        // `spec/02` §5.3 — the round-241 max product is well below
+        // u64::MAX), but we widen to u64 explicitly so the typed
+        // accessor is overflow-safe on the architectural upper bound.
         let mut slices: Vec<SliceLayout> = Vec::with_capacity(num_slices);
         let mut prev_rel = 0usize;
-        for &end_rel in &end_offsets {
+        let ph64 = u64::from(ph);
+        let ns64 = num_slices as u64;
+        let pw32 = pw;
+        for (s_idx, &end_rel) in end_offsets.iter().enumerate() {
+            let row_start = (ph64 * s_idx as u64) / ns64;
+            let row_end = (ph64 * (s_idx as u64 + 1)) / ns64;
+            let row_count = row_end - row_start;
             slices.push(SliceLayout {
                 start: slice_data_start + prev_rel,
                 end: slice_data_start + end_rel,
+                row_start: row_start as u32,
+                row_end: row_end as u32,
+                pixel_count: row_count as u32 * pw32,
             });
             prev_rel = end_rel;
         }

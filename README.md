@@ -5,6 +5,72 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 241 — typed slice-header row accessor.** The decode-free
+`peek_frame` path that ships through round 21 +
+[`inspect::SliceLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs)
+already returns the per-slice **byte** extent from the on-wire
+`slice_end_offsets` table (`spec/02` §5), but the partner field — the
+per-slice **row** range derived from the wiki partitioning formula
+(`spec/02` §5.2) — was kept implicit, forcing every downstream
+consumer to re-derive `floor((Hp * s) / S) .. floor((Hp * (s+1)) / S)`
+on its own. Round 241 surfaces it as a typed accessor on the same
+struct:
+
+```rust
+pub struct SliceLayout {
+    pub start: usize,        // unchanged — first bit-stream byte
+    pub end: usize,          // unchanged — past-the-end bit-stream byte
+    pub row_start: u32,      // NEW — floor((Hp * s)     / S)
+    pub row_end: u32,        // NEW — floor((Hp * (s+1)) / S)
+    pub pixel_count: u32,    // NEW — (row_end - row_start) * plane_width
+}
+```
+
+plus `SliceLayout::row_count()` (`row_end - row_start`) and the
+`PlaneLayout::total_pixels()` cross-check (`Σ pixel_count == width *
+height`, the `spec/02` §5.2 partition identity). The fields are
+populated by `peek_frame` in the same pass that already builds the
+byte extents — zero additional buffer allocation, no Huffman state,
+no behavioural change for callers that only read `start` / `end`.
+
+`pixel_count` matches the `n_pixels` argument shape of
+[`HuffmanTable::decode_slice`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/huffman.rs)
+exactly (`spec/05` §6 behavioural pseudocode
+`n_pixels = (r_end - r_start) * plane_width`), so a container indexer
+can compute "how many residual bytes will plane k decode to" before
+any Huffman pass runs.
+
+The new fields are pinned by six dedicated tests in
+[`tests/round241_slice_header_rows.rs`](https://github.com/OxideAV/oxideav-utvideo/blob/master/tests/round241_slice_header_rows.rs):
+
+- **`r2_uly2_testsrc_16x17_s3_rows_match_worked_example`** — the
+  worked example from `spec/02` §5.2: `plane_height = 17`, `S = 3`,
+  expected `row_counts = (5, 6, 6)`.
+- **`slice_rows_partition_is_gapless`** — for every (FOURCC, w, h, S)
+  combination the spec covers, the partition is gap-free and
+  overlap-free: `row_end[s] == row_start[s+1]` for every adjacent
+  pair, `row_start[0] == 0`, `row_end[last] == plane_height`.
+- **`total_pixels_matches_plane_area`** — the typed counterpart of
+  the existing `total_slice_data_bytes` cross-check:
+  `Σ slice.pixel_count == plane_width * plane_height`.
+- **`slice_count_above_plane_height_collapses_trailing_rows_to_zero`**
+  — the `spec/02` §5.1 empty-slice edge case: ULY4 16×3 with 4 slices
+  yields `row_counts = (0, 1, 1, 1)` and the first slice has
+  `pixel_count == 0` with a well-formed (empty) byte extent.
+- **`yuv420_chroma_rows_track_subsampled_plane_height`** — for ULY0
+  with `Y = 16` rows + `U = V = 8` rows and `S = 2`, the Y plane
+  yields `(8, 8)` and each chroma plane yields `(4, 4)`.
+- **`pixel_count_matches_n_pixels_huffman_argument`** — the
+  `spec/05` §6 invariant: every slice's `pixel_count` equals the
+  `n_pixels` value the Huffman pass would be invoked with on that
+  slice's bit-stream byte range.
+
+Test count: **307** (was 301, +6). No public API removal; only
+additive field growth on `SliceLayout` and one new convenience method.
+Headline estimate unchanged at **decode ~97% / encode ~97%** — the
+round surfaces existing header math through a typed accessor, not new
+bitstream capability.
+
 **Round 238 — per-slice predictor microbenches.** The four
 benches that shipped through round 11 (`decode` / `encode` full-frame,
 `huffman_lut` decode kernel, `rgb_decorrelate` inter-plane transform)

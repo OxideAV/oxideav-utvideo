@@ -8,6 +8,34 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 241 — typed slice-header row accessor on
+  `inspect::SliceLayout`.** Extends the decode-free per-frame layout
+  with the partitioning fields the wiki formula
+  (`spec/02` §5.2) derives from `(plane_height, num_slices,
+  slice_index)` alone: `row_start: u32`, `row_end: u32`,
+  `pixel_count: u32`, plus a `SliceLayout::row_count()` convenience
+  method and a `PlaneLayout::total_pixels()` cross-check.
+  Populated by `peek_frame` in the same pass that already builds the
+  per-slice byte extents — zero additional buffer allocation, no
+  Huffman state. Lets a container indexer / diagnostic tool answer
+  "which rows does slice `s` produce" and "how many residual symbols
+  is plane `k` going to emit" before any Huffman pass runs, matching
+  the `n_pixels` argument shape of
+  `HuffmanTable::decode_slice` (`spec/05` §6 pseudocode). The new
+  fields are additive (`SliceLayout` keeps its `Copy` / `PartialEq`
+  derives); existing callers reading only `start` / `end` see no
+  behavioural change. Six dedicated tests
+  (`tests/round241_slice_header_rows.rs`) pin the spec's worked
+  example `R2-uly2-testsrc-16x17-s3` → `(5, 6, 6)`, the gap-free /
+  overlap-free partition invariant, the `Σ pixel_count == width *
+  height` identity, the `num_slices > plane_height` zero-row
+  edge case (`spec/02` §5.1), the YUV-4:2:0 chroma half-height
+  propagation, and the `pixel_count == n_pixels` Huffman-argument
+  shape. Headline estimate unchanged at **decode ~97% / encode ~97%**
+  — round 241 surfaces existing header math through a typed
+  accessor, not new bitstream capability. Test count: 307 (was 301,
+  +6).
+
 - **Round 238 — per-slice predictor microbench
   (`benches/predict_slice.rs`).** Adds the fifth criterion bench,
   isolating the per-slice spatial-predictor primitives
