@@ -215,6 +215,46 @@ pub struct PlaneLayout {
     /// marker per `spec/05` §2.1, not a code length, so it never
     /// surfaces here.
     pub max_code_length: u8,
+    /// Minimum code length present in this plane's 256-byte Huffman
+    /// descriptor — the smallest value of `code_length[s]` over the
+    /// active range (`spec/05` §2.1: entries in `1..=254`).
+    ///
+    /// Range: `0..=254`. Two interpretations:
+    ///
+    /// - `0` — no active code lengths in the descriptor. Same shapes
+    ///   as [`max_code_length`] reports `0`: (a) the `spec/05` §6.1
+    ///   single-symbol plane (paired with `is_single_symbol == true`
+    ///   and `active_symbol_count == 0`); (b) the degenerate
+    ///   all-unused descriptor (every byte is the `255` sentinel,
+    ///   structurally rejected by `HuffmanTable::build` because Kraft
+    ///   equality can't be satisfied on an empty alphabet, but
+    ///   `peek_frame` surfaces the raw scan).
+    /// - `1..=254` — the shortest canonical-Huffman code this plane
+    ///   carries, in bits. Always satisfies `min_code_length <=
+    ///   max_code_length`.
+    ///
+    /// Per the `spec/05` §2.2 construction algorithm, the shortest
+    /// code is the all-ones bit pattern at this length (wiki line
+    /// 34 of the source snapshot cited in `spec/05` §1); the typed
+    /// accessor lets a container indexer / diagnostic tool reason
+    /// about the prefix-code shape without standing up the
+    /// `HuffmanTable`.
+    ///
+    /// Useful as a Kraft typed cross-check against the round-244
+    /// [`active_symbol_count`] accessor: for `K >= 2` active symbols,
+    /// Kraft equality (`Σ 2^-code_length[s] == 1` over the active
+    /// set per `spec/05` §2.2 step 3) requires the smallest term
+    /// `2^-min_code_length` to be `>= 1 / K`, giving the typed upper
+    /// bound `min_code_length <= floor(log2(K))`. Pairs with the
+    /// round-250 lower bound `max_code_length >= ceil(log2(K))`.
+    ///
+    /// The `255` sentinel is the "symbol unused" marker per
+    /// `spec/05` §2.1 — never a code length, so the active-range
+    /// scan ignores it.
+    ///
+    /// [`active_symbol_count`]: PlaneLayout::active_symbol_count
+    /// [`max_code_length`]: PlaneLayout::max_code_length
+    pub min_code_length: u8,
 }
 
 impl PlaneLayout {
@@ -376,26 +416,46 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
         let descriptor = &chunk_payload[offset..offset + 256];
         offset += 256;
 
-        // Single descriptor-byte fold computing three decode-free
+        // Single descriptor-byte fold computing four decode-free
         // typed primitives at once (round 21 single-symbol flag,
-        // round 244 active-symbol count, round 250 max code length).
-        // The `1..=254` active range is `spec/05` §2.1; the `0`
-        // sentinel is `spec/05` §6.1; the `255` sentinel is
-        // `spec/05` §2.1 ("symbol unused, no code is assigned").
+        // round 244 active-symbol count, round 250 max code length,
+        // round 255 min code length). The `1..=254` active range is
+        // `spec/05` §2.1; the `0` sentinel is `spec/05` §6.1; the
+        // `255` sentinel is `spec/05` §2.1 ("symbol unused, no code
+        // is assigned").
+        //
+        // The min tracker uses `u8::MAX` as the "no active byte seen
+        // yet" sentinel — safe because that value is the
+        // `255 == unused` sentinel that never enters the active-range
+        // arm. We collapse the sentinel to `0` after the fold so the
+        // public field's `0..=254` invariant holds: the only shapes
+        // the loop exits with sentinel-as-min are (a) the §6.1
+        // single-symbol case and (b) the degenerate all-unused
+        // descriptor, both of which the field documents as `0`.
         let mut zero_count = 0usize;
         let mut unused_count = 0usize;
         let mut max_code_length: u8 = 0;
+        let mut min_code_length: u8 = u8::MAX;
         for &b in descriptor {
             match b {
                 0 => zero_count += 1,
                 255 => unused_count += 1,
-                // Active range 1..=254; track the running max.
+                // Active range 1..=254; track the running max + min.
                 _ => {
                     if b > max_code_length {
                         max_code_length = b;
                     }
+                    if b < min_code_length {
+                        min_code_length = b;
+                    }
                 }
             }
+        }
+        // Collapse the "no active byte seen" sentinel to the documented
+        // `0` value (`spec/05` §6.1 single-symbol path + the
+        // structurally-rejected all-`255` descriptor share this shape).
+        if min_code_length == u8::MAX {
+            min_code_length = 0;
         }
         // Single-symbol detection per spec/05 §6.1: exactly one entry
         // is 0 (the sentinel symbol) and every other entry is 255
@@ -495,6 +555,7 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
             is_single_symbol,
             active_symbol_count,
             max_code_length,
+            min_code_length,
         });
     }
 
@@ -823,6 +884,70 @@ mod tests {
                 p.max_code_length, rescan,
                 "plane {} max {} != rescan {}",
                 p.plane_idx, p.max_code_length, rescan
+            );
+        }
+    }
+
+    #[test]
+    fn peek_frame_min_code_length_zero_on_single_symbol_planes() {
+        // A constant-content plane drives `spec/05` §6.1 single-symbol
+        // descriptors; the only non-`255` descriptor byte is the `0`
+        // sentinel, so no entry falls in the active range `1..=254` and
+        // the typed min is exactly 0 (matches the round-250 max-side
+        // `0`-collapse on the same path).
+        let fc = Fourcc::Uly4;
+        let (w, h) = (16, 16);
+        let cfg = cfg_for(fc, w, h, 1);
+        let planes = vec![
+            PlaneInput {
+                samples: vec![10u8; (w * h) as usize],
+            },
+            PlaneInput {
+                samples: vec![77u8; (w * h) as usize],
+            },
+            PlaneInput {
+                samples: vec![222u8; (w * h) as usize],
+            },
+        ];
+        let frame = EncodedFrame {
+            fourcc: fc,
+            width: w,
+            height: h,
+            predictor: Predictor::None,
+            num_slices: 1,
+            planes,
+        };
+        let bytes = encode_frame(&frame).unwrap();
+        let layout = peek_frame(&cfg, &bytes).unwrap();
+        for p in &layout.planes {
+            assert!(p.is_single_symbol);
+            assert_eq!(p.min_code_length, 0);
+        }
+    }
+
+    #[test]
+    fn peek_frame_min_code_length_matches_descriptor_byte_scan() {
+        // On a multi-symbol Kraft codebook the typed accessor must
+        // equal an independent rescan of the descriptor bytes via the
+        // reported `descriptor_start` offset, filtered to the active
+        // range `1..=254` per `spec/05` §2.1.
+        let fc = Fourcc::Uly2;
+        let (w, h) = (64, 48);
+        let cfg = cfg_for(fc, w, h, 4);
+        let bytes = encoded_for(fc, w, h, 4, Predictor::Gradient);
+        let layout = peek_frame(&cfg, &bytes).unwrap();
+        for p in &layout.planes {
+            let descriptor = &bytes[p.descriptor_start..p.descriptor_start + 256];
+            let rescan: u8 = descriptor
+                .iter()
+                .copied()
+                .filter(|&b| (1..=254).contains(&b))
+                .min()
+                .unwrap_or(0);
+            assert_eq!(
+                p.min_code_length, rescan,
+                "plane {} min {} != rescan {}",
+                p.plane_idx, p.min_code_length, rescan
             );
         }
     }

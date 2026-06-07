@@ -8,6 +8,54 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 255 — typed `min_code_length` accessor on
+  `inspect::PlaneLayout`.** Extends the decode-free per-frame layout
+  with a fifth decode-free typed semantic primitive — the smallest
+  value of `code_length[s]` over the active range of this plane's
+  256-byte Huffman descriptor (`spec/02` §4 + `spec/05` §2.1:
+  entries in `1..=254`). Joins the existing `is_single_symbol` flag
+  (round 21), the per-slice row-range / pixel-count fields on
+  `SliceLayout` (round 241), the `active_symbol_count` field (round
+  244), and the `max_code_length` field (round 250) — together the
+  five typed primitives surface the prefix-code's full depth band
+  `[min, max]` and Kraft-coupling fingerprint without standing up a
+  `HuffmanTable` or allocating a residual buffer. Range `0..=254`:
+  the value collapses to `0` on the `spec/05` §6.1 single-symbol
+  path (where the only non-`255` descriptor byte is the `0`
+  sentinel and no entry sits in the active range), otherwise
+  reports the shortest code length in bits. Per `spec/05` §2.2 +
+  the wiki algorithm description, the shortest code is the all-ones
+  bit pattern at this length. Three sub-shapes the field
+  discriminates: `min == 1` (a length-1 code exists, satisfying
+  `2^-1` of the Kraft sum); `min == max` (single-length descriptor
+  per `spec/05` §6.3 / §6.4, Huffman tree collapses to flat byte
+  indexing); `min < max` (general variable-length codebook, the
+  algorithm in `spec/05` §2.2 iterates over `[min, max]` assigning
+  codes). Populated by `peek_frame` in the same descriptor pass
+  that already computes `is_single_symbol`, `active_symbol_count`,
+  and `max_code_length` — the existing 256-byte descriptor slice is
+  folded over once to yield all four counters simultaneously,
+  keeping the inspector's `O(plane_count * num_slices)` complexity
+  intact and replacing a fourth `.iter().filter().min()` walk with
+  the existing single `match` loop. The new field is additive on
+  the `Vec`-carrying struct (`PlaneLayout` keeps its `Debug` /
+  `Clone` / `PartialEq` / `Eq` derives); existing callers reading
+  only the byte-offset / slice / single-symbol / active-count /
+  max-length fields see no behavioural change. Six dedicated tests
+  (`tests/round255_min_code_length.rs`) pin (a) the single-symbol
+  → zero min case, (b) the high-entropy → `1..=254` range across
+  every FOURCC, (c) the decode-free re-scan equivalence against
+  the on-wire descriptor byte slice via `descriptor_start`, (d)
+  the typed `min <= max` invariant across both branches, (e) the
+  Kraft upper-bound coupling against the round-244
+  `active_symbol_count` accessor (`min <= floor(log2(K))` on a
+  Kraft-satisfying codebook with `K >= 2`), and (f) the wire-format
+  invariant that `active_symbol_count >= 1` implies
+  `min_code_length >= 1` (the active range starts at `1`, not `0`).
+  Headline estimate unchanged at **decode ~97% / encode ~97%** —
+  round 255 surfaces existing descriptor-byte semantics through a
+  typed accessor, not new bitstream capability.
+
 - **Round 250 — typed `max_code_length` accessor on
   `inspect::PlaneLayout`.** Extends the decode-free per-frame layout
   with a fourth decode-free typed semantic primitive — the largest
