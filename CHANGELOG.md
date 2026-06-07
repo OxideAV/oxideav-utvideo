@@ -8,6 +8,49 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 250 — typed `max_code_length` accessor on
+  `inspect::PlaneLayout`.** Extends the decode-free per-frame layout
+  with a fourth decode-free typed semantic primitive — the largest
+  value of `code_length[s]` over the active range of this plane's
+  256-byte Huffman descriptor (`spec/02` §4 + `spec/05` §2.1:
+  entries in `1..=254`). Joins the existing `is_single_symbol` flag
+  (round 21), the per-slice row-range / pixel-count fields on
+  `SliceLayout` (round 241), and the `active_symbol_count` field
+  (round 244) — together the four typed primitives let a container
+  indexer pick a decode strategy (`spec/05` §7.3: flat `2^k`-entry
+  table vs. multi-stage table vs. tree walk) without standing up a
+  `HuffmanTable` or allocating a residual buffer. Range `0..=254`:
+  the value collapses to `0` on the `spec/05` §6.1 single-symbol
+  path (where the only non-`255` descriptor byte is the `0`
+  sentinel and no entry sits in the active range), otherwise
+  reports the longest code length in bits. The wire-format upper
+  bound is `254` per `spec/05` §7.2; `spec/05` §7.1 reports `16`
+  as the maximum observed across the behavioural corpus.
+  Populated by `peek_frame` in the same descriptor pass that
+  already computes `is_single_symbol` and `active_symbol_count` —
+  the existing 256-byte descriptor slice is folded over once to
+  yield all three counters simultaneously, keeping the inspector's
+  `O(plane_count * num_slices)` complexity intact and replacing
+  three separate `.iter().filter()` walks with a single `match`
+  loop. The new field is additive on the `Vec`-carrying struct
+  (`PlaneLayout` keeps its `Debug` / `Clone` / `PartialEq` / `Eq`
+  derives); existing callers reading only the byte-offset / slice
+  / single-symbol / active-count fields see no behavioural change.
+  Six dedicated tests
+  (`tests/round250_max_code_length.rs`) pin (a) the single-symbol
+  → zero max case, (b) the high-entropy → `1..=254` range across
+  every FOURCC, (c) the decode-free re-scan equivalence against
+  the on-wire descriptor byte slice via `descriptor_start`, (d)
+  the `spec/05` §7.1 empirical bound (`max <= 16` on the
+  corpus-like fixtures), (e) the `spec/05` §7.3 64 KiB-table-size
+  bound (`2^max <= 2^16`), and (f) the typed Kraft lower-bound
+  coupling against the round-244 `active_symbol_count` accessor
+  (`max >= ceil(log2(active))` on a Kraft-satisfying codebook).
+  Headline estimate unchanged at **decode ~97% / encode ~97%** —
+  round 250 surfaces existing descriptor-byte semantics through a
+  typed accessor, not new bitstream capability. Test count: 321
+  (was 313, +6 dedicated round-250 tests + 2 in-file unit tests).
+
 - **Round 244 — typed `active_symbol_count` accessor on
   `inspect::PlaneLayout`.** Extends the decode-free per-frame
   layout with a third decode-free typed semantic field — the count

@@ -184,6 +184,37 @@ pub struct PlaneLayout {
     /// here — `HuffmanTable::build` is what enforces Kraft
     /// (`spec/05` §2.2 step 3, surfaced as `Error::KraftViolation`).
     pub active_symbol_count: u32,
+    /// Maximum code length present in this plane's 256-byte Huffman
+    /// descriptor — the largest value of `code_length[s]` over the
+    /// active range (`spec/05` §2.1: entries in `1..=254`).
+    ///
+    /// Range: `0..=254`. Two interpretations:
+    ///
+    /// - `0` — no active code lengths in the descriptor. This is the
+    ///   case on (a) the `spec/05` §6.1 single-symbol plane (paired
+    ///   with `is_single_symbol == true` and `active_symbol_count ==
+    ///   0`) and (b) the degenerate all-unused descriptor (every byte
+    ///   is the `255` sentinel — structurally rejected by
+    ///   `HuffmanTable::build` because Kraft equality can't be
+    ///   satisfied on an empty alphabet, but `peek_frame` surfaces
+    ///   the raw scan).
+    /// - `1..=254` — the longest canonical-Huffman code this plane
+    ///   carries, in bits.
+    ///
+    /// Useful for a decoder selecting a decode strategy without
+    /// building the codebook: per `spec/05` §7.3, a flat
+    /// `2^max_code_length`-entry lookup table is appropriate when
+    /// the maximum is `<= 16`; a multi-stage table is preferable for
+    /// `16 < max_code_length <= 24`; only a tree-walk decoder works
+    /// for the full wire-format upper bound of `254` (`spec/05` §7.2).
+    /// `spec/05` §7.1 reports `16` as the maximum observed across the
+    /// behavioural corpus — but the `1..=254` wire range is what a
+    /// strictly conformant decoder must accept.
+    ///
+    /// Range: `0..=254`. The `255` sentinel is the "symbol unused"
+    /// marker per `spec/05` §2.1, not a code length, so it never
+    /// surfaces here.
+    pub max_code_length: u8,
 }
 
 impl PlaneLayout {
@@ -345,11 +376,30 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
         let descriptor = &chunk_payload[offset..offset + 256];
         offset += 256;
 
+        // Single descriptor-byte fold computing three decode-free
+        // typed primitives at once (round 21 single-symbol flag,
+        // round 244 active-symbol count, round 250 max code length).
+        // The `1..=254` active range is `spec/05` §2.1; the `0`
+        // sentinel is `spec/05` §6.1; the `255` sentinel is
+        // `spec/05` §2.1 ("symbol unused, no code is assigned").
+        let mut zero_count = 0usize;
+        let mut unused_count = 0usize;
+        let mut max_code_length: u8 = 0;
+        for &b in descriptor {
+            match b {
+                0 => zero_count += 1,
+                255 => unused_count += 1,
+                // Active range 1..=254; track the running max.
+                _ => {
+                    if b > max_code_length {
+                        max_code_length = b;
+                    }
+                }
+            }
+        }
         // Single-symbol detection per spec/05 §6.1: exactly one entry
         // is 0 (the sentinel symbol) and every other entry is 255
         // (the sentinel "unused").
-        let zero_count = descriptor.iter().filter(|&&b| b == 0).count();
-        let unused_count = descriptor.iter().filter(|&&b| b == 255).count();
         let is_single_symbol = zero_count == 1 && unused_count == 255;
         // Active-symbol count per spec/05 §2.1: entries with value
         // in the range 1..=254 carry an explicit code length and
@@ -444,6 +494,7 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
             slices,
             is_single_symbol,
             active_symbol_count,
+            max_code_length,
         });
     }
 
@@ -711,6 +762,69 @@ mod tests {
         bytes[p0.end_offsets_start..p0.end_offsets_start + 4].copy_from_slice(&bumped);
         let r = peek_frame(&cfg, &bytes);
         assert!(matches!(r, Err(Error::SliceNotWordAligned(_))), "got {r:?}");
+    }
+
+    #[test]
+    fn peek_frame_max_code_length_zero_on_single_symbol_planes() {
+        // A constant-content plane drives `spec/05` §6.1 single-symbol
+        // descriptors; the only non-`255` descriptor byte is the `0`
+        // sentinel, so no entry falls in the active range `1..=254` and
+        // the typed max is exactly 0.
+        let fc = Fourcc::Uly4;
+        let (w, h) = (16, 16);
+        let cfg = cfg_for(fc, w, h, 1);
+        let planes = vec![
+            PlaneInput {
+                samples: vec![10u8; (w * h) as usize],
+            },
+            PlaneInput {
+                samples: vec![77u8; (w * h) as usize],
+            },
+            PlaneInput {
+                samples: vec![222u8; (w * h) as usize],
+            },
+        ];
+        let frame = EncodedFrame {
+            fourcc: fc,
+            width: w,
+            height: h,
+            predictor: Predictor::None,
+            num_slices: 1,
+            planes,
+        };
+        let bytes = encode_frame(&frame).unwrap();
+        let layout = peek_frame(&cfg, &bytes).unwrap();
+        for p in &layout.planes {
+            assert!(p.is_single_symbol);
+            assert_eq!(p.max_code_length, 0);
+        }
+    }
+
+    #[test]
+    fn peek_frame_max_code_length_matches_descriptor_byte_scan() {
+        // On a multi-symbol Kraft codebook the typed accessor must
+        // equal an independent rescan of the descriptor bytes via the
+        // reported `descriptor_start` offset, filtered to the active
+        // range `1..=254` per `spec/05` §2.1.
+        let fc = Fourcc::Uly2;
+        let (w, h) = (64, 48);
+        let cfg = cfg_for(fc, w, h, 4);
+        let bytes = encoded_for(fc, w, h, 4, Predictor::Gradient);
+        let layout = peek_frame(&cfg, &bytes).unwrap();
+        for p in &layout.planes {
+            let descriptor = &bytes[p.descriptor_start..p.descriptor_start + 256];
+            let rescan: u8 = descriptor
+                .iter()
+                .copied()
+                .filter(|&b| (1..=254).contains(&b))
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                p.max_code_length, rescan,
+                "plane {} max {} != rescan {}",
+                p.plane_idx, p.max_code_length, rescan
+            );
+        }
     }
 
     #[test]

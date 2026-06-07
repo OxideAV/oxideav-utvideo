@@ -5,6 +5,92 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 250 — typed `max_code_length` accessor on
+[`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs).**
+Round 244 already surfaces three decode-free typed primitives per
+plane — `is_single_symbol` (round 21, `spec/05` §6.1), the per-slice
+`row_start` / `row_end` / `pixel_count` partitioning (round 241,
+`spec/02` §5.2), and the `active_symbol_count` (round 244,
+`spec/05` §2.1 active range `1..=254`). Round 250 extends the
+decode-free typed surface with a fourth primitive: the largest
+value of `code_length[s]` across this plane's 256-byte Huffman
+descriptor in the active range, per `spec/05` §7.
+
+```rust
+pub struct PlaneLayout {
+    // unchanged fields...
+    pub is_single_symbol: bool,
+    pub active_symbol_count: u32,
+    // NEW — max(code_length[s]) for entries in 1..=254 per
+    // `spec/05` §2.1; 0 when no active entries are present
+    // (e.g. the `spec/05` §6.1 single-symbol path).
+    pub max_code_length: u8,
+}
+```
+
+The new field is populated by `peek_frame` in the same descriptor
+pass that already computes `is_single_symbol` and
+`active_symbol_count` — the existing 256-byte descriptor slice is
+folded over once to yield all three counters via a single `match`
+loop instead of three separate `.iter().filter()` walks, keeping
+the inspector's `O(plane_count * num_slices)` complexity intact.
+
+The accessor gives a container indexer / diagnostic tool the
+information `spec/05` §7.3 calls out for decode-strategy selection
+without standing up a full `HuffmanTable`:
+
+- `max_code_length <= 16` — a flat `2^max`-entry decode table is
+  cheap enough (≤ 64 KiB).
+- `16 < max_code_length <= 24` — a multi-stage decode table is
+  preferable.
+- `max_code_length > 24` — only a tree-walk decoder remains; the
+  `spec/05` §7.2 wire-format upper bound is `254`.
+
+`spec/05` §7.1 reports `16` as the maximum observed across the
+behavioural corpus; the typed accessor surfaces the raw scan, so
+even the long-tail `spec/05` §7.2 codewords are visible to the
+caller.
+
+The new field is additive on a `Vec`-carrying struct
+(`PlaneLayout` keeps its `Debug` / `Clone` / `PartialEq` / `Eq`
+derives); existing callers reading only the byte-offset / slice /
+single-symbol / active-count fields see no behavioural change.
+
+Pinned by six dedicated tests in
+[`tests/round250_max_code_length.rs`](https://github.com/OxideAV/oxideav-utvideo/blob/master/tests/round250_max_code_length.rs):
+
+- **`single_symbol_plane_reports_zero_max_code_length`** — a
+  constant-content frame + `Predictor::None` drives the `spec/05`
+  §6.1 single-symbol path on every plane; the max collapses to 0
+  (the lone `code_length[s] == 0` entry is the sentinel, not an
+  active code).
+- **`high_entropy_plane_reports_max_in_active_range`** —
+  xorshift-driven content across every FOURCC
+  (`Ulrg` / `Ulra` / `Uly0` / `Uly2` / `Uly4`) produces Kraft
+  codebooks; the typed max lands in `1..=254`.
+- **`max_code_length_matches_descriptor_byte_scan`** — the field
+  equals an independent rescan of the descriptor bytes via the
+  reported `descriptor_start` offset (`spec/02` §4): exactly
+  `max(b in descriptor if 1..=254 contains b, else 0)`.
+- **`max_code_length_respects_spec_05_7_1_empirical_bound`** —
+  on a representative spread of FOURCCs + predictors the typed
+  max stays at or below the `spec/05` §7.1 corpus bound of `16`
+  bits.
+- **`max_code_length_bounds_codebook_index_size`** — the
+  resulting flat-decode-table size (`2^max`) stays within the
+  `spec/05` §7.3 64 KiB-table threshold on every fixture.
+- **`max_code_length_geq_kraft_lower_bound_for_active_count`** —
+  Kraft equality (`spec/05` §2.2 step 3) requires the longest
+  code to be at least `ceil(log2(active_symbol_count))` bits; the
+  round-244 active-count accessor and the round-250 max-length
+  accessor are coupled by this typed lower bound.
+
+Test count: **321** (was 313, +6 dedicated round-250 tests + 2
+in-file unit tests). No public API removal; only additive field
+growth on `PlaneLayout`. Headline estimate unchanged at **decode
+~97% / encode ~97%** — the round surfaces existing descriptor-byte
+semantics through a typed accessor, not new bitstream capability.
+
 **Round 244 — typed `active_symbol_count` accessor on
 [`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs).**
 The decode-free `peek_frame` path that ships through round 21 +
