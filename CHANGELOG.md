@@ -8,6 +8,47 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 261 — typed `min_code_length_symbol_count` accessor on
+  `inspect::PlaneLayout`.** Extends the decode-free per-frame
+  layout with a sixth decode-free typed semantic primitive — the
+  multiplicity of the shortest-length tier in this plane's
+  canonical Huffman codebook, i.e. the count of `code_length[s]`
+  entries equal to `min_code_length` over the active range
+  `1..=254` per `spec/05` §2.1. Joins the existing
+  `is_single_symbol` flag (round 21), the per-slice row-range /
+  pixel-count fields on `SliceLayout` (round 241), the
+  `active_symbol_count` field (round 244), the `max_code_length`
+  field (round 250), and the `min_code_length` field (round 255).
+  Range `0..=256`: the value collapses to `0` on the `spec/05`
+  §6.1 single-symbol path (matches the `min_code_length`
+  `0`-collapse on the same path); reports `1..=256` for canonical
+  Kraft codebooks (`1` when the shortest tier is occupied by
+  exactly one symbol, `>= 2` on the `spec/05` §6.2 two-symbol
+  `{1, 1}` case and the `spec/05` §6.3 / §6.4 single-length
+  descriptors, saturating at `active_symbol_count` when
+  `min_code_length == max_code_length`). Populated by `peek_frame`
+  in the same descriptor pass that already computes
+  `is_single_symbol`, `active_symbol_count`, `max_code_length`,
+  and `min_code_length` — the existing 256-byte descriptor
+  scan tracks the multiplicity inline (count resets to `1` on a
+  strictly-smaller active byte, increments when the running min is
+  re-seen), keeping the inspector's `O(plane_count * num_slices)`
+  complexity intact and avoiding a sixth `.iter().filter(|b| *b ==
+  min).count()` walk. The new field is additive on a `Vec`-carrying
+  struct (`PlaneLayout` keeps its `Debug` / `Clone` / `PartialEq` /
+  `Eq` derives); existing callers reading the byte-offset / slice /
+  single-symbol / active-count / max-length / min-length fields see
+  no behavioural change. Six dedicated tests in
+  `tests/round261_min_code_length_symbol_count.rs` plus two in-file
+  unit tests in `src/inspect.rs` pin the field semantics: the
+  single-symbol `0`-collapse, the multi-symbol positive count, the
+  descriptor-byte rescan invariant, the typed bound by
+  `active_symbol_count`, the Kraft typed upper bound
+  `<= 2^min_code_length` per `spec/05` §2.2 step 3, and the
+  saturation-at-`active_symbol_count` invariant on the
+  single-length-descriptor path (`spec/05` §6.3 / §6.4) driven by
+  a `spec/05` §6.2-shaped two-value checkerboard fixture.
+
 - **Round 255 — typed `min_code_length` accessor on
   `inspect::PlaneLayout`.** Extends the decode-free per-frame layout
   with a fifth decode-free typed semantic primitive — the smallest

@@ -5,6 +5,100 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 261 — typed `min_code_length_symbol_count` accessor on
+[`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs).**
+Round 255 surfaces five decode-free typed primitives per plane —
+`is_single_symbol` (round 21, `spec/05` §6.1), the per-slice
+`row_start` / `row_end` / `pixel_count` partitioning (round 241,
+`spec/02` §5.2), the `active_symbol_count` (round 244, `spec/05`
+§2.1 active range `1..=254`), the `max_code_length` (round 250,
+`spec/05` §7), and the `min_code_length` (round 255, `spec/05`
+§2.1 + §2.2 step 3). Round 261 extends the decode-free typed
+surface with a sixth primitive: the **multiplicity** of the
+shortest-length tier — the count of descriptor entries equal to
+`min_code_length` — per `spec/05` §2.2 step 2 + §6.2.
+
+```rust
+pub struct PlaneLayout {
+    // unchanged fields...
+    pub is_single_symbol: bool,
+    pub active_symbol_count: u32,
+    pub max_code_length: u8,
+    pub min_code_length: u8,
+    // NEW — count of code_length[s] entries equal to min_code_length
+    // over the active range 1..=254 per `spec/05` §2.1; 0 when no
+    // active entries are present (e.g. the `spec/05` §6.1
+    // single-symbol path), 1..=256 for canonical Kraft codebooks.
+    pub min_code_length_symbol_count: u32,
+}
+```
+
+The new field is populated by `peek_frame` in the same descriptor
+pass that already computes `is_single_symbol`,
+`active_symbol_count`, `max_code_length`, and `min_code_length`.
+The fold tracks the multiplicity inline — every time a strictly
+smaller active byte is observed, the running count resets to `1`;
+every time the running min is re-seen, the count increments — so
+the inspector's `O(plane_count * num_slices)` complexity stays
+intact (no extra `.iter().filter(|b| *b == min).count()` walk).
+
+Useful as a typed cross-check coupling four existing accessors:
+
+- `min_code_length_symbol_count <= active_symbol_count` —
+  trivially, one length-tier is bounded by the active total.
+- When `min_code_length == max_code_length` (the `spec/05` §6.3 /
+  §6.4 single-length-descriptor path), the count saturates at
+  `active_symbol_count` — every active symbol shares the one
+  tier.
+- Kraft typed bound: per `spec/05` §2.2 step 3, the
+  shortest-length tier contributes
+  `min_code_length_symbol_count * 2^-min_code_length` to the Kraft
+  sum; with non-negative longer-tier contributions, the count must
+  satisfy `min_code_length_symbol_count <= 2^min_code_length`. The
+  `spec/05` §6.2 two-symbol `{1, 1}` case saturates this at
+  `2 == 2^1` — useful as a structural recogniser of that
+  degenerate shape without standing up a `HuffmanTable`.
+
+The new field is additive on a `Vec`-carrying struct (`PlaneLayout`
+keeps its `Debug` / `Clone` / `PartialEq` / `Eq` derives); existing
+callers reading only the byte-offset / slice / single-symbol /
+active-count / max-length / min-length fields see no behavioural
+change.
+
+Pinned by six dedicated tests in
+[`tests/round261_min_code_length_symbol_count.rs`](https://github.com/OxideAV/oxideav-utvideo/blob/master/tests/round261_min_code_length_symbol_count.rs):
+
+- **`single_symbol_plane_reports_zero_count`** — a constant-content
+  frame + `Predictor::None` drives the `spec/05` §6.1 single-symbol
+  path on every plane; the count collapses to 0 alongside the
+  round-255 min collapse.
+- **`high_entropy_plane_reports_positive_count`** — xorshift-driven
+  content across every FOURCC (`Ulrg` / `Ulra` / `Uly0` / `Uly2` /
+  `Uly4`) produces Kraft codebooks; the typed count reports `>= 1`
+  at the reported `min_code_length`.
+- **`count_matches_descriptor_byte_scan`** — the field equals an
+  independent rescan of the descriptor bytes via the reported
+  `descriptor_start` offset (`spec/02` §4): exactly
+  `count(b in descriptor if b == min_code_length, else 0)`.
+- **`count_bounded_by_active_symbol_count`** — the typed bound
+  `min_code_length_symbol_count <= active_symbol_count` holds on
+  every FOURCC + predictor combination.
+- **`count_respects_kraft_upper_bound_on_min_length`** — Kraft
+  equality (`spec/05` §2.2 step 3) gives the typed upper bound
+  `min_code_length_symbol_count <= 2^min_code_length`; verified
+  across a representative FOURCC + predictor spread.
+- **`equals_active_count_on_single_length_descriptor`** — a
+  `spec/05` §6.2-shaped two-value checkerboard fixture drives a
+  single-length descriptor on every plane (every active symbol at
+  codelen 1); the count saturates at `active_symbol_count` per
+  the §6.3 / §6.4 saturation property.
+
+Test count: **337** (was 329, +6 dedicated round-261 tests + 2
+in-file unit tests). No public API removal; only additive field
+growth on `PlaneLayout`. Headline estimate unchanged at **decode
+~97% / encode ~97%** — the round surfaces existing descriptor-byte
+semantics through a typed accessor, not new bitstream capability.
+
 **Round 255 — typed `min_code_length` accessor on
 [`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs).**
 Round 250 already surfaces four decode-free typed primitives per
