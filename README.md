@@ -5,9 +5,80 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
-**Round 261 — typed `min_code_length_symbol_count` accessor on
+**Round 275 — typed `code_length_histogram` accessor + `kraft_numerator`
+convenience on
 [`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs).**
-Round 255 surfaces five decode-free typed primitives per plane —
+The decode-free `peek_frame` path surfaces four scalar descriptor
+primitives through rounds 244 / 250 / 255 / 261 —
+`active_symbol_count` (`spec/05` §2.1), `max_code_length` (§7),
+`min_code_length` (§2.2 step 3), and `min_code_length_symbol_count`
+(§2.2 step 2). Round 275 surfaces the **superset** all four are
+projections of: the full per-length-tier **code-length histogram**
+— the tiers the `spec/05` §2.2 step 2 canonical-Huffman sort groups
+symbols into — as an ascending-by-length `Vec<(code_length, count)>`
+over the active range `1..=254` (`spec/05` §2.1).
+
+```rust
+pub struct PlaneLayout {
+    // unchanged fields...
+    pub min_code_length_symbol_count: u32,
+    // NEW — ascending-by-length (code_length, count) pairs over the
+    // active range 1..=254 per `spec/05` §2.1; empty for the §6.1
+    // single-symbol path. No zero-count tiers; at most one pair per
+    // length.
+    pub code_length_histogram: Vec<(u8, u32)>,
+}
+
+impl PlaneLayout {
+    /// NEW — `2^max`-scaled integer Kraft sum `Σ count·2^(max-L)`
+    /// over the histogram (`spec/05` §2.2 step 3); `0` when empty.
+    pub fn kraft_numerator(&self) -> u128 { /* ... */ }
+}
+```
+
+The histogram is populated by `peek_frame` in the same descriptor
+fold that already computes the four scalars — a `[u32; 256]`
+per-length tally is accumulated inline (no extra descriptor walk),
+then compacted to the ascending pair list dropping absent tiers, so
+the inspector's `O(plane_count * num_slices)` complexity is intact.
+Each scalar accessor is now a documented projection: `Σ count ==
+active_symbol_count`; first/last pair length == `min`/`max`; first
+pair count == `min_code_length_symbol_count`.
+
+The companion `kraft_numerator()` returns the `2^max_code_length`-scaled
+Kraft sum as an exact `u128` integer; a canonical-Huffman descriptor
+satisfies Kraft **equality** (`spec/05` §2.2 step 3) iff
+`kraft_numerator() == 1 << max_code_length` — the same completeness
+condition `HuffmanTable::build` enforces as `Error::KraftViolation`,
+now available decode-free from the on-wire descriptor so a container
+indexer can validate prefix-code completeness without standing up a
+`HuffmanTable`. A single-length descriptor (`spec/05` §6.3 / §6.4)
+is the degenerate one-pair list `[(L, 2^L)]`.
+
+The new field is additive on the already-`Vec`-carrying `PlaneLayout`
+(`Debug` / `Clone` / `PartialEq` / `Eq` derives retained); existing
+callers reading only the byte-offset / slice / scalar-descriptor
+fields see no behavioural change.
+
+Pinned by six dedicated tests in
+[`tests/round275_code_length_histogram.rs`](https://github.com/OxideAV/oxideav-utvideo/blob/master/tests/round275_code_length_histogram.rs):
+`single_symbol_plane_reports_empty_histogram`,
+`histogram_is_strictly_ascending_with_no_zero_tiers`,
+`histogram_projects_scalar_accessors`,
+`histogram_matches_descriptor_byte_scan`,
+`kraft_numerator_equals_denominator_on_well_formed_descriptors`, and
+`single_length_descriptor_is_one_tier` (a §6.2/§6.3 two-value
+checkerboard driving a single-tier histogram per plane).
+
+Test count: **345** (was 337, +6 dedicated round-275 tests + 2
+in-file unit tests). No public API removal; only additive field +
+method growth on `PlaneLayout`. Headline estimate unchanged at
+**decode ~97% / encode ~97%** — the round surfaces existing
+descriptor-byte semantics through a typed accessor, not new
+bitstream capability. ULH\*/HBD/Lite/interlaced remain blocked on
+out-of-corpus docs.
+
+Round 261 surfaces five decode-free typed primitives per plane —
 `is_single_symbol` (round 21, `spec/05` §6.1), the per-slice
 `row_start` / `row_end` / `pixel_count` partitioning (round 241,
 `spec/02` §5.2), the `active_symbol_count` (round 244, `spec/05`

@@ -304,6 +304,62 @@ pub struct PlaneLayout {
     ///
     /// [`min_code_length`]: PlaneLayout::min_code_length
     pub min_code_length_symbol_count: u32,
+    /// Per-length-tier multiplicity of this plane's 256-byte Huffman
+    /// descriptor — the full **code-length histogram** over the active
+    /// range (`spec/05` §2.1: entries in `1..=254`), as a compact
+    /// ascending-by-length list of `(code_length, count)` pairs.
+    ///
+    /// This is the per-tier structure the `spec/05` §2.2 step 2 sort
+    /// groups symbols into before the §2.2 step 4 code-assignment walk:
+    /// each pair `(L, n)` says "`n` active symbols carry an `L`-bit
+    /// code". The scalar accessors shipped through rounds 244 / 250 /
+    /// 255 / 261 are all projections of this list:
+    ///
+    /// - [`active_symbol_count`] `== Σ n` over every pair.
+    /// - [`max_code_length`] `==` the `L` of the last pair (`0` when
+    ///   empty).
+    /// - [`min_code_length`] `==` the `L` of the first pair (`0` when
+    ///   empty).
+    /// - [`min_code_length_symbol_count`] `==` the `n` of the first
+    ///   pair (`0` when empty).
+    ///
+    /// Ordering + shape guarantees:
+    ///
+    /// - **Ascending by length**, strictly: each pair's `L` is greater
+    ///   than the previous pair's, so the list has at most one entry per
+    ///   length tier (`1..=254`, so at most 254 entries).
+    /// - **No zero-count tiers**: a length carrying no active symbol is
+    ///   absent from the list (it is NOT recorded as `(L, 0)`).
+    /// - **Empty list** exactly when [`active_symbol_count`] `== 0` —
+    ///   the `spec/05` §6.1 single-symbol path (paired with
+    ///   `is_single_symbol == true`) or the degenerate all-`255`-unused
+    ///   descriptor (structurally rejected by `HuffmanTable::build` but
+    ///   surfaced decode-free here).
+    ///
+    /// Typed cross-checks the list makes available without standing up a
+    /// `HuffmanTable`:
+    ///
+    /// - **Kraft numerator** (`spec/05` §2.2 step 3): scale the Kraft
+    ///   sum `Σ n · 2^-L` by `2^max_code_length` to get the integer
+    ///   `Σ n · 2^(max-L)`; a Kraft-complete descriptor satisfies
+    ///   `Σ n · 2^(max-L) == 2^max_code_length` exactly. The
+    ///   [`kraft_numerator`] convenience returns that integer so a
+    ///   container indexer can validate a descriptor's prefix-code
+    ///   completeness decode-free (the same equality
+    ///   `HuffmanTable::build` enforces as `Error::KraftViolation`,
+    ///   `spec/05` §2.2). A single-length descriptor (`spec/05` §6.3 /
+    ///   §6.4) is the degenerate one-pair list `[(L, 2^L)]`.
+    ///
+    /// The `0` sentinel (`spec/05` §6.1) and the `255` sentinel
+    /// ("symbol unused" per `spec/05` §2.1) are both excluded — neither
+    /// is a code length, so neither enters the histogram.
+    ///
+    /// [`active_symbol_count`]: PlaneLayout::active_symbol_count
+    /// [`max_code_length`]: PlaneLayout::max_code_length
+    /// [`min_code_length`]: PlaneLayout::min_code_length
+    /// [`min_code_length_symbol_count`]: PlaneLayout::min_code_length_symbol_count
+    /// [`kraft_numerator`]: PlaneLayout::kraft_numerator
+    pub code_length_histogram: Vec<(u8, u32)>,
 }
 
 impl PlaneLayout {
@@ -354,6 +410,33 @@ impl PlaneLayout {
     pub fn unused_symbol_count(&self) -> u32 {
         let single = if self.is_single_symbol { 1 } else { 0 };
         256 - self.active_symbol_count - single
+    }
+
+    /// Integer Kraft numerator of this plane's descriptor: the
+    /// `2^max_code_length`-scaled Kraft sum
+    /// `Σ count · 2^(max_code_length - code_length)` over the
+    /// [`code_length_histogram`] tiers (`spec/05` §2.2 step 3). Returns
+    /// `0` for the empty histogram (`active_symbol_count == 0`).
+    ///
+    /// A canonical-Huffman descriptor satisfies Kraft **equality**
+    /// (`spec/05` §2.2 step 3) iff this numerator equals the Kraft
+    /// denominator `2^max_code_length` — i.e. iff
+    /// `kraft_numerator() == 1 << max_code_length`. That is the same
+    /// completeness condition `HuffmanTable::build` enforces (surfaced
+    /// as `Error::KraftViolation` on failure, `spec/05` §2.2), available
+    /// here decode-free from the on-wire descriptor alone.
+    ///
+    /// The result is exact: every term `count · 2^(max - L)` is a
+    /// non-negative integer, and the sum is bounded by
+    /// `active_symbol_count · 2^max_code_length <= 256 · 2^254`, so the
+    /// accumulation is done in `u128` to stay overflow-safe on the
+    /// `spec/05` §7.2 wire upper bound of `max_code_length == 254`.
+    pub fn kraft_numerator(&self) -> u128 {
+        let max = self.max_code_length;
+        self.code_length_histogram
+            .iter()
+            .map(|&(len, count)| u128::from(count) << (max - len))
+            .sum()
     }
 }
 
@@ -495,13 +578,21 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
         let mut max_code_length: u8 = 0;
         let mut min_code_length: u8 = u8::MAX;
         let mut min_code_length_symbol_count: u32 = 0;
+        // Per-length-tier multiplicity over the active range `1..=254`
+        // (`spec/05` §2.1) — index `L` carries the count of descriptor
+        // entries equal to `L`. The `0` and `255` sentinels never index
+        // into the active span. Compacted into the ascending
+        // `code_length_histogram` list after the fold.
+        let mut length_counts = [0u32; 256];
         for &b in descriptor {
             match b {
                 0 => zero_count += 1,
                 255 => unused_count += 1,
-                // Active range 1..=254; track running max, min, and
-                // the shortest-tier multiplicity in lockstep.
+                // Active range 1..=254; track running max, min, the
+                // shortest-tier multiplicity, and the full per-length
+                // histogram in lockstep.
                 _ => {
+                    length_counts[b as usize] += 1;
                     if b > max_code_length {
                         max_code_length = b;
                     }
@@ -512,6 +603,16 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
                         min_code_length_symbol_count += 1;
                     }
                 }
+            }
+        }
+        // Compact the per-length counts into an ascending-by-length list
+        // of `(code_length, count)` pairs, dropping zero-count tiers
+        // (`spec/05` §2.2 step 2 groups symbols by length; absent
+        // lengths carry no symbol). Empty when no active byte was seen.
+        let mut code_length_histogram: Vec<(u8, u32)> = Vec::new();
+        for (len, &count) in length_counts.iter().enumerate() {
+            if count > 0 {
+                code_length_histogram.push((len as u8, count));
             }
         }
         // Collapse the "no active byte seen" sentinel to the documented
@@ -622,6 +723,7 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
             max_code_length,
             min_code_length,
             min_code_length_symbol_count,
+            code_length_histogram,
         });
     }
 
@@ -1083,6 +1185,73 @@ mod tests {
                 "plane {} count {} != rescan {}",
                 p.plane_idx, p.min_code_length_symbol_count, rescan
             );
+        }
+    }
+
+    #[test]
+    fn peek_frame_code_length_histogram_empty_on_single_symbol_planes() {
+        // A constant-content plane drives the `spec/05` §6.1
+        // single-symbol path; no descriptor byte lands in the active
+        // range `1..=254`, so the histogram is empty and the
+        // projections collapse alongside it.
+        let fc = Fourcc::Uly4;
+        let (w, h) = (16, 16);
+        let cfg = cfg_for(fc, w, h, 1);
+        let planes = vec![
+            PlaneInput {
+                samples: vec![10u8; (w * h) as usize],
+            },
+            PlaneInput {
+                samples: vec![77u8; (w * h) as usize],
+            },
+            PlaneInput {
+                samples: vec![222u8; (w * h) as usize],
+            },
+        ];
+        let frame = EncodedFrame {
+            fourcc: fc,
+            width: w,
+            height: h,
+            predictor: Predictor::None,
+            num_slices: 1,
+            planes,
+        };
+        let bytes = encode_frame(&frame).unwrap();
+        let layout = peek_frame(&cfg, &bytes).unwrap();
+        for p in &layout.planes {
+            assert!(p.is_single_symbol);
+            assert!(p.code_length_histogram.is_empty());
+            assert_eq!(p.kraft_numerator(), 0);
+        }
+    }
+
+    #[test]
+    fn peek_frame_code_length_histogram_projects_scalar_accessors() {
+        // On a multi-symbol Kraft codebook the histogram is the superset
+        // the round 244 / 250 / 255 / 261 scalars project from, and a
+        // Kraft-complete descriptor satisfies the integer Kraft equality
+        // `kraft_numerator == 2^max_code_length` (`spec/05` §2.2 step 3).
+        let fc = Fourcc::Uly2;
+        let (w, h) = (64, 48);
+        let cfg = cfg_for(fc, w, h, 4);
+        let bytes = encoded_for(fc, w, h, 4, Predictor::Gradient);
+        let layout = peek_frame(&cfg, &bytes).unwrap();
+        for p in &layout.planes {
+            let hist = &p.code_length_histogram;
+            assert!(!hist.is_empty());
+            // Strictly ascending by length, no zero-count tiers.
+            for win in hist.windows(2) {
+                assert!(win[0].0 < win[1].0);
+            }
+            assert!(hist.iter().all(|&(_, n)| n > 0));
+            // Projections.
+            let total: u32 = hist.iter().map(|&(_, n)| n).sum();
+            assert_eq!(total, p.active_symbol_count);
+            assert_eq!(hist.first().unwrap().0, p.min_code_length);
+            assert_eq!(hist.first().unwrap().1, p.min_code_length_symbol_count);
+            assert_eq!(hist.last().unwrap().0, p.max_code_length);
+            // Kraft equality on the integer numerator.
+            assert_eq!(p.kraft_numerator(), 1u128 << p.max_code_length);
         }
     }
 
