@@ -438,6 +438,61 @@ impl PlaneLayout {
             .map(|&(len, count)| u128::from(count) << (max - len))
             .sum()
     }
+
+    /// Decode-free predicate: does this plane's 256-byte Huffman
+    /// descriptor form a **complete prefix code** per `spec/05` §2.2
+    /// step 3?
+    ///
+    /// Three shapes the wire format permits (`spec/05` §§2.1, 2.2, 6.1)
+    /// map to a `bool` as follows:
+    ///
+    /// - **Single-symbol path** ([`is_single_symbol`] `== true`,
+    ///   `spec/05` §6.1) — `true`. The lone `code_length[s] == 0`
+    ///   sentinel stands for a degenerate complete code: every pixel of
+    ///   the plane decodes to symbol `s`, so the "prefix code" trivially
+    ///   covers the whole alphabet the slice data uses. The histogram is
+    ///   empty here, so the [`kraft_numerator`] arithmetic does not
+    ///   apply; this arm is recognised by the flag.
+    /// - **Active canonical codebook** ([`active_symbol_count`] `>= 1`,
+    ///   non-empty histogram) — `true` iff Kraft **equality** holds:
+    ///   `kraft_numerator() == 2^max_code_length` (the `2^max`-scaled
+    ///   integer form of `Σ count · 2^-code_length == 1`, `spec/05`
+    ///   §2.2 step 3). A descriptor whose lengths sum to **less** than a
+    ///   full code (an *incomplete* tree, Kraft sum `< 1`) or to **more**
+    ///   than one (an *over-subscribed* tree, Kraft sum `> 1`) returns
+    ///   `false`. This is the same completeness condition
+    ///   [`crate::huffman::HuffmanTable::build`] enforces as
+    ///   `Error::KraftViolation` — surfaced here decode-free from the
+    ///   on-wire descriptor alone, **before** any `HuffmanTable` is
+    ///   stood up.
+    /// - **Empty / all-`255`-unused descriptor** (no active byte, not
+    ///   single-symbol) — `false`. No symbol carries a code, so no
+    ///   prefix code exists; [`peek_frame`] surfaces this shape
+    ///   decode-free even though `HuffmanTable::build` structurally
+    ///   rejects it.
+    ///
+    /// `peek_frame` itself does **not** reject a Kraft-incomplete
+    /// descriptor (it stays a byte-walk and never builds a Huffman
+    /// table), so a container indexer that wants to confirm a frame's
+    /// descriptors are decode-ready — without paying for a
+    /// `HuffmanTable::build` per plane — can call this predicate on each
+    /// [`PlaneLayout`]. The full decoder ([`crate::decode_frame`]) would
+    /// reject any plane for which this returns `false` with
+    /// `Error::KraftViolation` (or the single-symbol sentinel errors)
+    /// at `HuffmanTable::build` time.
+    ///
+    /// [`is_single_symbol`]: PlaneLayout::is_single_symbol
+    /// [`active_symbol_count`]: PlaneLayout::active_symbol_count
+    /// [`kraft_numerator`]: PlaneLayout::kraft_numerator
+    pub fn is_kraft_complete(&self) -> bool {
+        if self.is_single_symbol {
+            return true;
+        }
+        if self.code_length_histogram.is_empty() {
+            return false;
+        }
+        self.kraft_numerator() == 1u128 << self.max_code_length
+    }
 }
 
 /// Decode-free per-frame layout view of a chunk payload.
@@ -475,6 +530,23 @@ impl FrameLayout {
     /// against the chunk-payload byte count the demuxer hands us.
     pub fn total_size(&self) -> usize {
         self.planes.iter().map(|p| p.total_size()).sum::<usize>() + 4
+    }
+
+    /// Decode-free predicate: do **all** planes of this frame carry a
+    /// complete prefix code per `spec/05` §2.2 step 3?
+    ///
+    /// Frame-level roll-up of [`PlaneLayout::is_kraft_complete`] —
+    /// `true` iff every plane returns `true` (vacuously `true` for a
+    /// zero-plane frame, which [`peek_frame`] never produces). A `false`
+    /// here means at least one plane's 256-byte descriptor would be
+    /// rejected by [`crate::huffman::HuffmanTable::build`]
+    /// (`Error::KraftViolation` or a single-symbol sentinel error), so
+    /// the full decoder ([`crate::decode_frame`]) would fail on this
+    /// frame. Lets a container indexer gate "is this frame decode-ready?"
+    /// on a single byte-walk without standing up a `HuffmanTable` per
+    /// plane.
+    pub fn all_planes_kraft_complete(&self) -> bool {
+        self.planes.iter().all(|p| p.is_kraft_complete())
     }
 }
 
@@ -1266,5 +1338,40 @@ mod tests {
         // end-offset tables, and the trailing frame_info dword.
         let overhead = layout.planes.len() * 256 + layout.planes.len() * 4 * layout.num_slices + 4;
         assert_eq!(layout.total_slice_data_bytes(), bytes.len() - overhead);
+    }
+
+    #[test]
+    fn is_kraft_complete_true_on_encoder_output() {
+        // Every plane the encoder emits carries a complete prefix code
+        // (`spec/05` §2.2 step 3); the predicate folds the single-symbol
+        // flag + the kraft_numerator identity into one bool.
+        let fc = Fourcc::Uly4;
+        let (w, h) = (48, 32);
+        let cfg = cfg_for(fc, w, h, 2);
+        let bytes = encoded_for(fc, w, h, 2, Predictor::Gradient);
+        let layout = peek_frame(&cfg, &bytes).unwrap();
+        for p in &layout.planes {
+            assert!(p.is_kraft_complete(), "plane {} not complete", p.plane_idx);
+        }
+        assert!(layout.all_planes_kraft_complete());
+    }
+
+    #[test]
+    fn is_kraft_complete_false_on_incomplete_descriptor() {
+        // A single codelen-1 entry, everything else 255: Kraft sum 1/2 < 1
+        // (`spec/05` §2.2 step 3). peek_frame accepts the byte-walk;
+        // the predicate reports false (and decode_frame would
+        // KraftViolation).
+        let fc = Fourcc::Uly4;
+        let (w, h) = (16, 16);
+        let cfg = cfg_for(fc, w, h, 1);
+        let mut bytes = encoded_for(fc, w, h, 1, Predictor::Left);
+        for b in bytes[0..256].iter_mut() {
+            *b = 255;
+        }
+        bytes[42] = 1;
+        let layout = peek_frame(&cfg, &bytes).unwrap();
+        assert!(!layout.planes[0].is_kraft_complete());
+        assert!(!layout.all_planes_kraft_complete());
     }
 }

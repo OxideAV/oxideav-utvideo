@@ -5,6 +5,65 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 291 — decode-free `is_kraft_complete` predicate on
+[`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs)
++ `all_planes_kraft_complete` frame roll-up on `inspect::FrameLayout`.**
+Round 275 surfaced the per-length `code_length_histogram` and the integer
+`kraft_numerator()` (the `2^max`-scaled Kraft sum, `spec/05` §2.2 step 3).
+Round 291 folds that numerator plus the `is_single_symbol` flag into the
+`bool` a caller actually wants:
+
+```rust
+impl PlaneLayout {
+    /// True iff this plane's 256-byte descriptor forms a complete prefix
+    /// code (`spec/05` §2.2 step 3) — i.e. iff `HuffmanTable::build`
+    /// would accept it. Three shapes: single-symbol (`spec/05` §6.1) →
+    /// true; active codebook → `kraft_numerator() == 2^max_code_length`;
+    /// empty / all-`255`-unused → false.
+    pub fn is_kraft_complete(&self) -> bool { /* ... */ }
+}
+
+impl FrameLayout {
+    /// True iff every plane is Kraft-complete — a decode-free
+    /// "is this frame decode-ready?" gate.
+    pub fn all_planes_kraft_complete(&self) -> bool { /* ... */ }
+}
+```
+
+The value over `kraft_numerator()` alone is that `peek_frame` is a pure
+byte-walk and does **not** reject a Kraft-incomplete descriptor (unlike
+`decode_frame`, which trips `Error::KraftViolation` at
+`HuffmanTable::build` time). So a container indexer can now gate
+"will this frame decode?" on a single byte-walk — covering the three
+shapes `peek_frame` admits but `decode_frame` may reject — without
+standing up a `HuffmanTable` per plane. The single-symbol §6.1 path
+(empty histogram) is recognised by the flag and returns `true`; an
+all-`255`-unused descriptor (no active byte, not single-symbol) returns
+`false`; an active codebook returns the round-275 Kraft-equality
+identity.
+
+Pinned by eight dedicated tests in
+[`tests/round291_kraft_complete.rs`](https://github.com/OxideAV/oxideav-utvideo/blob/master/tests/round291_kraft_complete.rs):
+`encoder_frames_are_all_kraft_complete`,
+`single_symbol_plane_is_kraft_complete`,
+`predicate_matches_decode_outcome` (predicate iff `decode_frame`
+succeeds), `kraft_incomplete_descriptor_reports_false`,
+`kraft_excess_descriptor_reports_false`,
+`all_unused_descriptor_reports_false`,
+`predicate_agrees_with_kraft_numerator_identity`, and
+`single_length_descriptor_is_kraft_complete`; plus 2 in-file unit tests
+(`is_kraft_complete_true_on_encoder_output`,
+`is_kraft_complete_false_on_incomplete_descriptor`).
+
+Test count: **355** (was 345, +8 dedicated round-291 tests + 2 in-file
+unit tests). No public API removal; only additive method growth on
+`PlaneLayout` + `FrameLayout`. Headline estimate unchanged at **decode
+~97% / encode ~97%** — the round surfaces the existing
+descriptor-completeness condition (`HuffmanTable::build`'s
+`KraftViolation` check) through a decode-free typed predicate, not new
+bitstream capability. ULH\*/HBD/Lite/interlaced remain blocked on
+out-of-corpus docs.
+
 **Round 275 — typed `code_length_histogram` accessor + `kraft_numerator`
 convenience on
 [`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs).**

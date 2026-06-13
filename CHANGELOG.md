@@ -8,6 +8,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 291 — decode-free `is_kraft_complete` predicate on
+  `inspect::PlaneLayout` + `all_planes_kraft_complete` frame roll-up on
+  `inspect::FrameLayout`.** Folds the round-275 integer `kraft_numerator`
+  (`spec/05` §2.2 step 3) and the round-21 `is_single_symbol` flag into
+  the completeness `bool` a caller wants: "does this plane's 256-byte
+  descriptor form a complete prefix code — i.e. would `HuffmanTable::build`
+  accept it?" Three shapes the wire format admits map to the predicate:
+  the `spec/05` §6.1 single-symbol path (empty histogram, flag-recognised)
+  → `true`; an active canonical codebook → `true` iff
+  `kraft_numerator() == 2^max_code_length` (Kraft equality, `spec/05`
+  §2.2 step 3); an empty / all-`255`-unused descriptor (no active byte,
+  not single-symbol) → `false`. The value over `kraft_numerator()` alone
+  is that `peek_frame` is a pure byte-walk that does **not** reject a
+  Kraft-incomplete descriptor (unlike `decode_frame`, which trips
+  `Error::KraftViolation` at `HuffmanTable::build` time), so the predicate
+  is the decode-free "is this frame decode-ready?" oracle the inspector
+  path otherwise lacked. `FrameLayout::all_planes_kraft_complete()` rolls
+  the per-plane predicate up over a frame. Both are additive methods —
+  no field or signature change. Pinned by 8 dedicated integration tests
+  (`tests/round291_kraft_complete.rs`) covering the all-FOURCC ×
+  all-predictor encoder-complete sweep, the single-symbol /
+  single-length / all-unused / Kraft-incomplete / Kraft-excess shapes,
+  the predicate-iff-`decode_frame`-succeeds equivalence, and the
+  `kraft_numerator` identity agreement — plus 2 in-file unit tests.
+  Test count 345 → 355.
 - **Round 261 — typed `min_code_length_symbol_count` accessor on
   `inspect::PlaneLayout`.** Extends the decode-free per-frame
   layout with a sixth decode-free typed semantic primitive — the
