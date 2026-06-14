@@ -29,10 +29,23 @@
 //!    `(peek.predictor, peek.frame_info) == (decoded.predictor,
 //!    decoded.frame_info)`.
 //!
-//! Plus a fourth deterministic-only property the libFuzzer target
-//! can't easily assert (it can't enumerate descriptors):
+//! 4. **Typed-accessor invariants** — every documented cross-accessor
+//!    invariant of the round-244..291 typed accessors
+//!    (`active_symbol_count` / `max_code_length` / `min_code_length` /
+//!    `min_code_length_symbol_count` / `code_length_histogram` /
+//!    `kraft_numerator` / `unused_symbol_count` / `is_kraft_complete` /
+//!    `total_pixels` / `total_size` / `slice_data_total`) holds on every
+//!    plane of a successful `peek_frame` (`assert_typed_accessor_invariants`).
 //!
-//! 4. **Roundtrip seed corpus** — every `(FOURCC, predictor,
+//! 5. **Decode ⇒ Kraft-complete** — a successful `decode_frame` implies
+//!    `all_planes_kraft_complete()`, since `HuffmanTable::build` rejects
+//!    any incomplete descriptor (`spec/05` §2.2) and the single-symbol
+//!    path is complete by definition (`spec/05` §6.1).
+//!
+//! Plus a deterministic-only property the libFuzzer target can't easily
+//! assert (it can't enumerate descriptors):
+//!
+//! 6. **Roundtrip seed corpus** — every `(FOURCC, predictor,
 //!    num_slices, dims)` cell in a small enumeration is round-tripped
 //!    `encode_frame -> peek_frame -> decode_frame` and the inspector
 //!    output is checked field-by-field against the decoder output.
@@ -147,6 +160,9 @@ fn assert_fuzz_invariants(cfg: &StreamConfig, payload: &[u8]) {
         );
         assert_eq!(peek_info_dword, layout.frame_info);
         assert_eq!(peek_info_pred, layout.predictor);
+
+        // Property 4: typed-accessor invariants on every plane.
+        assert_typed_accessor_invariants(layout);
     }
 
     // Property 3: inspector/decoder agreement on success.
@@ -156,7 +172,183 @@ fn assert_fuzz_invariants(cfg: &StreamConfig, payload: &[u8]) {
             .expect("decode_frame succeeded; peek_frame must succeed on the same bytes");
         assert_eq!(layout.frame_info, decoded.frame_info);
         assert_eq!(layout.predictor, decoded.predictor);
+
+        // Property 5: a successful decode implies every plane's
+        // descriptor is Kraft-complete (`HuffmanTable::build` rejects an
+        // incomplete / over-subscribed descriptor, `spec/05` §2.2; the
+        // single-symbol path is complete by definition, `spec/05` §6.1).
+        assert!(
+            layout.all_planes_kraft_complete(),
+            "decode_frame succeeded but all_planes_kraft_complete() is false"
+        );
     }
+}
+
+/// Property 4 — assert every documented typed-accessor invariant on
+/// each plane of a successful `peek_frame`. Mirrors the Property 4 block
+/// of `fuzz/fuzz_targets/inspect_utvideo.rs`; see the accessor
+/// doc-comments in `src/inspect.rs` (`spec/05` §§2.1, 2.2, 6.1 +
+/// `spec/02` §5) for each invariant's derivation.
+fn assert_typed_accessor_invariants(layout: &oxideav_utvideo::FrameLayout) {
+    for plane in &layout.planes {
+        let p = plane.plane_idx;
+
+        // Descriptor-byte conservation (`spec/05` §2.1).
+        let single = u32::from(plane.is_single_symbol);
+        assert_eq!(
+            plane.active_symbol_count + plane.unused_symbol_count() + single,
+            256,
+            "plane {p}: active+unused+single != 256"
+        );
+        assert!(plane.active_symbol_count <= 256, "plane {p}: active > 256");
+
+        // Code-length range (`spec/05` §2.1: active is 1..=254).
+        assert!(
+            plane.max_code_length <= 254,
+            "plane {p}: max_code_length > 254"
+        );
+        assert!(
+            plane.min_code_length <= plane.max_code_length,
+            "plane {p}: min_code_length > max_code_length"
+        );
+
+        // Single-symbol path forces all length counters to 0 (`spec/05` §6.1).
+        if plane.is_single_symbol {
+            assert_eq!(
+                plane.active_symbol_count, 0,
+                "plane {p}: single but active != 0"
+            );
+            assert_eq!(
+                plane.max_code_length, 0,
+                "plane {p}: single but max_len != 0"
+            );
+            assert_eq!(
+                plane.min_code_length, 0,
+                "plane {p}: single but min_len != 0"
+            );
+            assert_eq!(
+                plane.min_code_length_symbol_count, 0,
+                "plane {p}: single but min_len_count != 0"
+            );
+            assert!(
+                plane.code_length_histogram.is_empty(),
+                "plane {p}: single but histogram non-empty"
+            );
+        }
+
+        // Histogram <-> scalar projection (`code_length_histogram` doc).
+        let hist = &plane.code_length_histogram;
+        assert_eq!(
+            hist.is_empty(),
+            plane.active_symbol_count == 0,
+            "plane {p}: histogram-empty / active-zero disagreement"
+        );
+        let mut prev_len: Option<u8> = None;
+        let mut hist_total: u32 = 0;
+        for &(len, count) in hist {
+            assert!(
+                (1..=254).contains(&len),
+                "plane {p}: histogram tier length {len} out of active range"
+            );
+            assert!(
+                count >= 1,
+                "plane {p}: histogram tier ({len}) has zero count"
+            );
+            if let Some(prev) = prev_len {
+                assert!(len > prev, "plane {p}: histogram not strictly ascending");
+            }
+            prev_len = Some(len);
+            hist_total = hist_total
+                .checked_add(count)
+                .expect("histogram count overflow");
+        }
+        assert_eq!(
+            hist_total, plane.active_symbol_count,
+            "plane {p}: Σ histogram count != active_symbol_count"
+        );
+        if let (Some(first), Some(last)) = (hist.first(), hist.last()) {
+            assert_eq!(
+                first.0, plane.min_code_length,
+                "plane {p}: first tier len != min"
+            );
+            assert_eq!(
+                first.1, plane.min_code_length_symbol_count,
+                "plane {p}: first tier count != min_code_length_symbol_count"
+            );
+            assert_eq!(
+                last.0, plane.max_code_length,
+                "plane {p}: last tier len != max"
+            );
+        }
+
+        // Min-tier multiplicity cross-checks (`min_code_length_symbol_count` doc).
+        assert!(
+            plane.min_code_length_symbol_count <= plane.active_symbol_count,
+            "plane {p}: min_len_count > active"
+        );
+        if plane.active_symbol_count > 0 && plane.min_code_length == plane.max_code_length {
+            assert_eq!(
+                plane.min_code_length_symbol_count, plane.active_symbol_count,
+                "plane {p}: single-length descriptor but min_len_count != active"
+            );
+        }
+
+        // Kraft numerator / completeness consistency (`spec/05` §2.2 step 3).
+        let kn = plane.kraft_numerator();
+        assert_eq!(
+            kn == 0,
+            hist.is_empty(),
+            "plane {p}: kraft_numerator-zero / histogram-empty disagreement"
+        );
+        let expected_complete = if plane.is_single_symbol {
+            true
+        } else if hist.is_empty() {
+            false
+        } else {
+            kn == 1u128 << plane.max_code_length
+        };
+        assert_eq!(
+            plane.is_kraft_complete(),
+            expected_complete,
+            "plane {p}: is_kraft_complete disagrees with kraft_numerator arithmetic"
+        );
+
+        // Per-plane geometry identities (`spec/02` §5).
+        assert_eq!(
+            plane.total_pixels(),
+            u64::from(plane.width) * u64::from(plane.height),
+            "plane {p}: total_pixels != width*height"
+        );
+        assert_eq!(
+            plane.slice_data_total() % 4,
+            0,
+            "plane {p}: slice_data_total not word-aligned"
+        );
+        assert_eq!(
+            plane.total_size(),
+            256 + 4 * plane.slices.len() + plane.slice_data_total(),
+            "plane {p}: total_size identity broken"
+        );
+    }
+
+    // Frame roll-up identities (`FrameLayout` docs).
+    let plane_total_sum: usize = layout.planes.iter().map(|p| p.total_size()).sum();
+    assert_eq!(
+        layout.total_size(),
+        plane_total_sum + 4,
+        "frame total_size != Σ plane_total_size + 4"
+    );
+    let plane_slice_sum: usize = layout.planes.iter().map(|p| p.slice_data_total()).sum();
+    assert_eq!(
+        layout.total_slice_data_bytes(),
+        plane_slice_sum,
+        "frame total_slice_data_bytes != Σ plane slice_data_total"
+    );
+    assert_eq!(
+        layout.all_planes_kraft_complete(),
+        layout.planes.iter().all(|p| p.is_kraft_complete()),
+        "all_planes_kraft_complete != ∀ plane is_kraft_complete"
+    );
 }
 
 // ---------------------------------------------------------------------

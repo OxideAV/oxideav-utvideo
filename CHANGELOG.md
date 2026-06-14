@@ -8,6 +8,32 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 301 — fuzz depth: cross-accessor invariant pinning for the
+  round-244..291 typed inspector accessors.** The `inspect_utvideo`
+  cargo-fuzz target (round 228) predates every typed, decode-free
+  `PlaneLayout` / `FrameLayout` accessor added across rounds 244 / 250 /
+  255 / 261 / 275 / 291, so none of their documented cross-accessor
+  invariants were exercised on attacker-shaped chunk bytes. Two new
+  properties now run in both the libFuzzer target and its stable-CI
+  mirror (`tests/round228_inspect_fuzz_properties.rs`): **Property 4**
+  asserts, on every successful `peek_frame`, the descriptor-byte
+  conservation law `active + unused + single == 256` (`spec/05` §2.1),
+  the strictly-ascending no-zero-tier `code_length_histogram` and its
+  scalar projections (`min`/`max`/`min_count`, Σ count ==
+  `active_symbol_count`), the single-symbol path (`spec/05` §6.1)
+  forcing all length counters to 0, the `kraft_numerator` /
+  `is_kraft_complete` consistency (`== 2^max` iff complete, `spec/05`
+  §2.2 step 3), and the geometry identities `total_pixels ==
+  width*height`, word-aligned `slice_data_total`, `total_size == 256 +
+  4*num_slices + slice_data_total` (`spec/02` §5), rolled up to the
+  frame-level `total_size` / `total_slice_data_bytes` /
+  `all_planes_kraft_complete` identities. **Property 5** pins that a
+  successful `decode_frame` implies `all_planes_kraft_complete()` —
+  `HuffmanTable::build` rejects any incomplete descriptor (`spec/05`
+  §2.2) and the single-symbol path is complete by definition (`spec/05`
+  §6.1). No `src/` change; pure test/fuzz hardening of already-shipped
+  accessors.
+
 - **Round 291 — decode-free `is_kraft_complete` predicate on
   `inspect::PlaneLayout` + `all_planes_kraft_complete` frame roll-up on
   `inspect::FrameLayout`.** Folds the round-275 integer `kraft_numerator`

@@ -5,6 +5,45 @@ Pure-Rust Ut Video lossless codec for the
 
 ## Status
 
+**Round 301 — fuzz depth: cross-accessor invariant pinning for the
+round-244..291 typed inspector accessors.** The `inspect_utvideo`
+cargo-fuzz target (round 228) predates the entire family of typed,
+decode-free `PlaneLayout` / `FrameLayout` accessors added across rounds
+244 / 250 / 255 / 261 / 275 / 291 — so until now none of their
+documented cross-accessor invariants were exercised on attacker-shaped
+chunk bytes. This round adds two new properties to the inspector fuzz
+target (and its stable-CI mirror,
+[`tests/round228_inspect_fuzz_properties.rs`](https://github.com/OxideAV/oxideav-utvideo/blob/master/tests/round228_inspect_fuzz_properties.rs)):
+
+- **Property 4 — typed-accessor invariants.** On every successful
+  `peek_frame`, each plane must satisfy the conservation law
+  `active_symbol_count + unused_symbol_count + (single?1:0) == 256`
+  (`spec/05` §2.1); a strictly-ascending, no-zero-tier
+  `code_length_histogram` whose projections recover the
+  `min`/`max`/`min_count` scalar accessors and whose tier counts sum to
+  `active_symbol_count`; the single-symbol path (`spec/05` §6.1) forcing
+  all length counters to 0 and an empty histogram; the
+  `kraft_numerator` / `is_kraft_complete` consistency
+  (`== 2^max_code_length` iff complete, `spec/05` §2.2 step 3); and the
+  geometry identities `total_pixels == width*height`,
+  word-aligned `slice_data_total`, and
+  `total_size == 256 + 4*num_slices + slice_data_total` (`spec/02` §5),
+  rolled up to the frame-level `total_size`/`total_slice_data_bytes`/
+  `all_planes_kraft_complete` identities.
+- **Property 5 — decode ⇒ Kraft-complete.** A successful `decode_frame`
+  implies `all_planes_kraft_complete()`: `HuffmanTable::build` rejects
+  any incomplete / over-subscribed descriptor (`spec/05` §2.2) and the
+  single-symbol path is complete by definition (`spec/05` §6.1), so the
+  decode-free predicate and the real decoder can never disagree on which
+  frames are codebook-decodable.
+
+No `src/` change — this is pure test/fuzz hardening of accessors that
+already shipped. The two properties run on the deterministic seed
+corpus + the well-formed roundtrip cells of the stable mirror (CI lane,
+all 9 tests green) and on attacker bytes during the daily nightly fuzz
+run. Headline estimate unchanged at **decode ~97% / encode ~97%**.
+ULH\*/HBD/Lite/interlaced remain blocked on out-of-corpus docs.
+
 **Round 291 — decode-free `is_kraft_complete` predicate on
 [`inspect::PlaneLayout`](https://github.com/OxideAV/oxideav-utvideo/blob/master/src/inspect.rs)
 + `all_planes_kraft_complete` frame roll-up on `inspect::FrameLayout`.**
