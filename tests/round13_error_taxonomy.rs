@@ -50,9 +50,10 @@
 //!    partition (no overlap, no gap) at runtime.
 //!
 //! All `Error` variants currently defined (as of this round) are
-//! exercised: 18 variants × 5 invariants per variant = 90 assertions
-//! by hand-built fixture values, plus a per-variant Display sanity
-//! tally and a partition-correctness assert.
+//! exercised by hand-built fixture values, plus a per-variant Display
+//! sanity tally and a partition-correctness assert. The
+//! `NonZeroPadding` variant added in round 335 (strict-decode trailing
+//! padding check, `spec/05` §4.3 / §8) is included in the partition.
 //!
 //! No spec dependence; this is purely about the public error-handling
 //! contract. No external library source, no web; no codec wire bytes
@@ -88,6 +89,11 @@ fn every_variant() -> Vec<Error> {
             bit_position: 99,
             expected_pixels: 256,
             decoded: 250,
+        },
+        Error::NonZeroPadding {
+            plane: 1,
+            slice: 2,
+            bit_position: 271,
         },
         Error::DimensionConstraint("test-only"),
         Error::MissingFrameInfo,
@@ -180,6 +186,19 @@ fn display_slice_truncated_reports_position_and_counts() {
 }
 
 #[test]
+fn display_non_zero_padding_reports_plane_slice_bit() {
+    let s = Error::NonZeroPadding {
+        plane: 2,
+        slice: 5,
+        bit_position: 271,
+    }
+    .to_string();
+    for expected in ["2", "5", "271"] {
+        assert!(s.contains(expected), "missing {expected} in {s:?}");
+    }
+}
+
+#[test]
 fn display_dimension_constraint_reports_inner_message() {
     let s = Error::DimensionConstraint("odd width on ULY0").to_string();
     assert!(
@@ -250,6 +269,11 @@ fn category_malformed_stream_variants() {
             bit_position: 0,
             expected_pixels: 1,
             decoded: 0,
+        },
+        Error::NonZeroPadding {
+            plane: 0,
+            slice: 0,
+            bit_position: 0,
         },
         Error::MissingFrameInfo,
     ];
@@ -359,10 +383,10 @@ fn category_count_matches_variant_count() {
     // overall fixture count. A drift trips the round-13 partition
     // invariant.
     let total = every_variant().len();
-    // 8 malformed + 3 api-misuse + 3 unsupported + 4 stream-shape = 18.
+    // 9 malformed + 3 api-misuse + 3 unsupported + 4 stream-shape = 19.
     assert_eq!(
-        total, 18,
-        "every_variant() length drifted from expected 18 — update round13_error_taxonomy.rs"
+        total, 19,
+        "every_variant() length drifted from expected 19 — update round13_error_taxonomy.rs"
     );
 }
 

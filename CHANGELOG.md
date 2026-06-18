@@ -8,6 +8,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 335 — opt-in strict-decode trailing-padding verification
+  (`decode_frame_strict`).** `spec/05` §4.3 specifies that a slice's
+  bit stream is zero-padded from the last Huffman code to the next
+  32-bit word boundary, and `spec/05` §8 names a non-zero padding bit a
+  SHOULD-warn for defensive decoders. The default `decode_frame` path
+  follows the companion "a decoder MUST NOT consume the padding bits"
+  rule and ignores the slice tail; up to this round there was no way to
+  *reject* a stream whose encoder left non-zero padding. The new
+  `decoder::decode_frame_strict` entry point (re-exported at the crate
+  root) decodes identically to `decode_frame` for any well-formed
+  stream but additionally scans each slice's trailing padding and
+  elevates a set bit to a hard `Error::NonZeroPadding { plane, slice,
+  bit_position }` (category `MalformedStream`). Implementation:
+  `HuffmanTable::decode_slice` is refactored over a shared
+  `decode_slice_inner` that also returns the post-payload bit cursor;
+  the new `decode_slice_strict` runs the §4.3 zero-padding scan via a
+  `BitReader::first_nonzero_bit_from_here` helper (word-at-a-time over
+  whole zero words, MSB-first offset reporting). Strict decode always
+  takes the serial path so the location fields stay deterministic. New
+  `tests/round335_strict_padding.rs` pins strict/lenient equivalence
+  across every FourCC × predictor × slice-count clean frame plus the
+  flipped-padding-bit rejection; the round-13 error-taxonomy suite
+  grows to 19 variants. No wire-format change; default decode behaviour
+  is unchanged.
+
 - **Round 301 — fuzz depth: cross-accessor invariant pinning for the
   round-244..291 typed inspector accessors.** The `inspect_utvideo`
   cargo-fuzz target (round 228) predates every typed, decode-free

@@ -189,13 +189,60 @@ impl HuffmanTable {
     /// `(sym, len)` in `self.lut`. If `len <= LUT_BITS`, emit and
     /// advance by `len`. Otherwise, fall back to length-tier scan.
     pub fn decode_slice(&self, slice_data: &[u8], n_pixels: usize) -> Result<Vec<u8>> {
+        let (out, _) = self.decode_slice_inner(slice_data, n_pixels)?;
+        Ok(out)
+    }
+
+    /// Strict-mode slice decode: decode `n_pixels` residuals exactly as
+    /// [`decode_slice`](Self::decode_slice), then additionally verify
+    /// the trailing word-boundary padding (`spec/05` §4.3) is all zero.
+    /// `spec/05` §8 names a non-zero padding bit a SHOULD-warn for
+    /// defensive decoders; this path elevates it to a hard
+    /// [`Error::NonZeroPadding`] so a conformance-checking caller can
+    /// reject streams whose encoder did not zero the slice tail.
+    ///
+    /// `plane` / `slice` are threaded through only to populate the error
+    /// variant's location fields; they do not affect decoding.
+    pub fn decode_slice_strict(
+        &self,
+        slice_data: &[u8],
+        n_pixels: usize,
+        plane: usize,
+        slice: usize,
+    ) -> Result<Vec<u8>> {
+        let (out, payload_bits) = self.decode_slice_inner(slice_data, n_pixels)?;
+        // The single-symbol / empty-codebook fast paths consume no bits
+        // and `slice_data` is empty (`spec/05` §6.1); `payload_bits`
+        // is 0 and the scan below is a no-op. For the normal path,
+        // `payload_bits` is the bit-reader cursor after the last code.
+        let br = {
+            let mut r = BitReader::new(slice_data);
+            r.consume_bits(payload_bits);
+            r
+        };
+        if let Some(bit_position) = br.first_nonzero_bit_from_here() {
+            return Err(Error::NonZeroPadding {
+                plane,
+                slice,
+                bit_position,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Core slice decode shared by the lenient and strict entry points.
+    /// Returns the decoded residuals plus the absolute bit position of
+    /// the bit reader after the final symbol (i.e. the payload bit
+    /// count, which the strict path compares against the slice's total
+    /// bit length to locate trailing padding).
+    fn decode_slice_inner(&self, slice_data: &[u8], n_pixels: usize) -> Result<(Vec<u8>, usize)> {
         if let Some(sym) = self.single_symbol {
             // Single-symbol fast path: zero bits, every pixel = sym.
             // `slice_data` should be empty in this case (`spec/05` §6.1).
-            return Ok(vec![sym; n_pixels]);
+            return Ok((vec![sym; n_pixels], 0));
         }
         if n_pixels == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         if self.by_length.is_empty() {
             // No codebook + non-zero pixel count is malformed.
@@ -279,7 +326,7 @@ impl HuffmanTable {
                 }
             }
         }
-        Ok(out)
+        Ok((out, br.position()))
     }
 
     /// Maximum non-sentinel code length in this table. 0 for the
@@ -428,6 +475,59 @@ impl<'a> BitReader<'a> {
 
     pub fn consume_bits(&mut self, n: usize) {
         self.pos += n;
+    }
+
+    /// Total bits in the backing buffer (`data.len() * 8`).
+    #[inline]
+    pub fn total_bits(&self) -> usize {
+        self.total_bits
+    }
+
+    /// Scan the bits in `[self.pos, self.total_bits)` and return the
+    /// absolute bit offset of the first set (non-zero) bit, or `None`
+    /// if every remaining bit is zero. Used by the strict decode path
+    /// to validate the trailing word-boundary padding is zero per
+    /// `spec/05` §4.3. Does not advance the read cursor.
+    ///
+    /// Bits are scanned in the same MSB-first-within-LE-word order the
+    /// reader consumes, so a returned offset is directly comparable to
+    /// [`position`](Self::position).
+    pub fn first_nonzero_bit_from_here(&self) -> Option<usize> {
+        let mut bp = self.pos;
+        // Walk bit-by-bit at the boundary, then word-at-a-time once
+        // word-aligned, to keep the common (all-zero, often <32 bits)
+        // case cheap without a per-bit loop over whole zero words.
+        while bp < self.total_bits && bp % 32 != 0 {
+            if self.bit_at(bp) {
+                return Some(bp);
+            }
+            bp += 1;
+        }
+        while bp + 32 <= self.total_bits {
+            let word = self.load_word((bp / 32) * 4);
+            if word != 0 {
+                // Some bit in this word is set; find which (MSB-first).
+                let lead = word.leading_zeros() as usize;
+                return Some(bp + lead);
+            }
+            bp += 32;
+        }
+        while bp < self.total_bits {
+            if self.bit_at(bp) {
+                return Some(bp);
+            }
+            bp += 1;
+        }
+        None
+    }
+
+    /// Read a single bit at absolute offset `bit`, MSB-first within
+    /// the enclosing 32-bit LE word. Caller ensures `bit < total_bits`.
+    #[inline]
+    fn bit_at(&self, bit: usize) -> bool {
+        let word = self.load_word((bit / 32) * 4);
+        let shift = 31 - (bit % 32);
+        (word >> shift) & 1 != 0
     }
 }
 
@@ -795,5 +895,94 @@ mod tests {
         let out = t.decode_slice(&data, 32).unwrap();
         assert!(out.iter().all(|&s| s == 0));
         assert_eq!(out.len(), 32);
+    }
+
+    // -----------------------------------------------------------------
+    // Round 335 — trailing-padding scan + strict slice decode.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn first_nonzero_bit_finds_msb_first_position() {
+        // One LE word 0x0000_0001 = byte-stream [01, 00, 00, 00]. The
+        // single set bit is value 0x00000001, the LSB of the word, which
+        // is bit 31 in MSB-first reading order.
+        let data = 1u32.to_le_bytes().to_vec();
+        let br = BitReader::new(&data);
+        assert_eq!(br.first_nonzero_bit_from_here(), Some(31));
+
+        // A fully-zero word -> no set bit.
+        let zeros = vec![0u8; 8];
+        let brz = BitReader::new(&zeros);
+        assert_eq!(brz.first_nonzero_bit_from_here(), None);
+
+        // 0x8000_0000 -> the MSB of the word is bit 0.
+        let top = 0x8000_0000u32.to_le_bytes().to_vec();
+        let brt = BitReader::new(&top);
+        assert_eq!(brt.first_nonzero_bit_from_here(), Some(0));
+    }
+
+    #[test]
+    fn first_nonzero_bit_respects_cursor() {
+        // Two words: word0 all zero, word1 = 0x0000_0001 (set bit at
+        // absolute bit 63). After consuming the first 32 bits the scan
+        // starts mid-stream and still locates bit 63.
+        let mut data = 0u32.to_le_bytes().to_vec();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        let mut br = BitReader::new(&data);
+        br.consume_bits(32);
+        assert_eq!(br.first_nonzero_bit_from_here(), Some(63));
+        // From the very start, same bit is found.
+        let br2 = BitReader::new(&data);
+        assert_eq!(br2.first_nonzero_bit_from_here(), Some(63));
+    }
+
+    #[test]
+    fn decode_slice_strict_accepts_zero_padding() {
+        // Two-symbol {0:1, 128:1} table; emit 18 codes = 18 bits, padded
+        // to 32 with zeros by the writer (spec/05 §4.3). Strict decode
+        // must accept and match the lenient decode.
+        let d = make_descriptor(&[(0, 1), (128, 1)]);
+        let t = HuffmanTable::build(&d).unwrap();
+        let symbols: Vec<u8> = (0..18).map(|i| if i % 2 == 0 { 0 } else { 128 }).collect();
+        let mut bw = BitWriter::new();
+        for &s in &symbols {
+            let (c, l) = t.code_for(s).unwrap();
+            bw.write_code(c, l);
+        }
+        let bytes = bw.finish();
+        assert_eq!(bytes.len(), 4, "18 bits pad to one 32-bit word");
+        let strict = t.decode_slice_strict(&bytes, symbols.len(), 0, 0).unwrap();
+        assert_eq!(strict, symbols);
+    }
+
+    #[test]
+    fn decode_slice_strict_rejects_nonzero_padding() {
+        let d = make_descriptor(&[(0, 1), (128, 1)]);
+        let t = HuffmanTable::build(&d).unwrap();
+        let symbols: Vec<u8> = (0..18).map(|i| if i % 2 == 0 { 0 } else { 128 }).collect();
+        let mut bw = BitWriter::new();
+        for &s in &symbols {
+            let (c, l) = t.code_for(s).unwrap();
+            bw.write_code(c, l);
+        }
+        let mut bytes = bw.finish();
+        // Set the lowest-value bit of the word (absolute bit 31, well
+        // past the 18 payload bits) -> a non-zero padding bit.
+        bytes[0] |= 0x01;
+        // Lenient still decodes (ignores the tail).
+        assert_eq!(t.decode_slice(&bytes, symbols.len()).unwrap(), symbols);
+        // Strict rejects with the location fields populated.
+        match t.decode_slice_strict(&bytes, symbols.len(), 2, 5) {
+            Err(Error::NonZeroPadding {
+                plane,
+                slice,
+                bit_position,
+            }) => {
+                assert_eq!(plane, 2);
+                assert_eq!(slice, 5);
+                assert_eq!(bit_position, 31);
+            }
+            other => panic!("expected NonZeroPadding, got {other:?}"),
+        }
     }
 }

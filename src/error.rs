@@ -74,6 +74,22 @@ pub enum Error {
         decoded: usize,
     },
 
+    /// A slice's trailing bit-stream padding was not all zero. Per
+    /// `spec/05` §4.3 the bits after a slice's last Huffman code up to
+    /// the next 32-bit word boundary are zero-padded, and `spec/05` §8
+    /// names a non-zero padding bit a SHOULD-warn for defensive
+    /// decoders. This variant is produced **only** by the opt-in
+    /// strict decode path ([`crate::decode_frame_strict`]); the
+    /// default decoder follows the spec's "MUST NOT consume padding"
+    /// rule and ignores trailing bits. `bit_position` is the absolute
+    /// bit offset (within the offending slice's data) of the first
+    /// non-zero padding bit; `plane` / `slice` locate it in the frame.
+    NonZeroPadding {
+        plane: usize,
+        slice: usize,
+        bit_position: usize,
+    },
+
     /// Caller-supplied frame dimensions disagreed with the FOURCC's
     /// chroma-subsampling rules (`spec/02` §3.2). E.g. odd width on
     /// ULY0 or ULY2.
@@ -159,6 +175,14 @@ impl core::fmt::Display for Error {
                 f,
                 "oxideav-utvideo: slice truncated at bit {bit_position} (decoded {decoded}/{expected_pixels} pixels)"
             ),
+            Error::NonZeroPadding {
+                plane,
+                slice,
+                bit_position,
+            } => write!(
+                f,
+                "oxideav-utvideo: non-zero slice padding in plane {plane} slice {slice} at bit {bit_position}"
+            ),
             Error::DimensionConstraint(s) => {
                 write!(f, "oxideav-utvideo: dimension constraint violated: {s}")
             }
@@ -235,7 +259,7 @@ pub enum ErrorCategory {
     /// Examples: `ChunkTooShort`, `NonMonotonicSliceOffsets`,
     /// `SliceNotWordAligned`, `KraftViolation`,
     /// `MultipleSingleSymbolSentinels`, `HuffmanDecodeFailure`,
-    /// `SliceTruncated`, `MissingFrameInfo`.
+    /// `SliceTruncated`, `NonZeroPadding`, `MissingFrameInfo`.
     MalformedStream,
     /// Caller-side typed contract violation. Examples:
     /// `EncoderPlaneSizeMismatch`, `InvalidSliceCount`,
@@ -287,6 +311,7 @@ impl Error {
             | Error::MultipleSingleSymbolSentinels
             | Error::HuffmanDecodeFailure { .. }
             | Error::SliceTruncated { .. }
+            | Error::NonZeroPadding { .. }
             | Error::MissingFrameInfo => ErrorCategory::MalformedStream,
         }
     }

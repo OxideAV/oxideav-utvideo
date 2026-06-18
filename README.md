@@ -40,7 +40,11 @@ predictor.
 ## Public API
 
 - [`decode_frame`] — decode one `00dc` chunk payload into per-plane
-  samples (`DecodedFrame`).
+  samples (`DecodedFrame`). [`decode_frame_strict`] is an opt-in
+  conformance variant: byte-identical output for any well-formed
+  stream, but it additionally verifies each slice's trailing
+  word-boundary padding is zero (spec §05 §4.3 / §8) and rejects a
+  non-zero padding bit with a located `Error::NonZeroPadding`.
 - [`encode_frame`] — encode per-plane samples into one chunk payload.
   Explicit `*_serial` / `*_parallel` entry points are available for
   latency-sensitive or threadpool-controlled callers.
