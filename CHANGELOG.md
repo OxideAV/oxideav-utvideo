@@ -6,6 +6,34 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Performance
+
+- **Accumulator-driven Huffman slice decode (~1.5x full-frame).** The
+  per-pixel decode kernel `HuffmanTable::decode_slice_inner` previously
+  called `BitReader::peek_bits` once (or more) per symbol, which
+  recomputes the word index and reloads the backing 32-bit word from
+  raw bytes on *every* pixel — the dominant cost of a dense-plane
+  decode. The hot loop now holds the next bits in a left-aligned 64-bit
+  register (valid bits at the MSB end), refilled 32 bits at a time
+  MSB-first within each LE word so the bit order is byte-for-byte
+  identical to the old `peek_bits` reads. Each symbol becomes a top-12
+  mask → LUT lookup → drop-`len`-bits register op; LUT-miss long codes
+  (>12 bits) run a length-tier prefix scan directly over the buffered
+  accumulator bits, so a single long code no longer evicts the whole
+  slice to the slow path. The loop only stays in flight while it holds
+  at least `max_len` *real* buffered bits — the moment it cannot
+  guarantee a full-length code without crossing the (zero) padding
+  tail, it syncs the `BitReader` to the consumed bit position and hands
+  the sub-`max_len` remainder to the unchanged slow path, which keeps
+  the original `peek_bits` zero-extension semantics. Output is
+  bit-identical (full existing test suite passes with zero edits,
+  including the `max_code_length` 13–16-bit and Huffman-fuzz property
+  tests). Benches (`benches/decode.rs`, `benches/huffman_lut.rs`):
+  pure-LUT kernel −45% (1.85x); full ULRG 1080p single-slice decode
+  32.3 ms → 22.3 ms (−33%, 1.45x); ULY2 21.1 ms → 13.8 ms (−35%,
+  1.53x); serial slice-scaling 14.2 ms → 9.0 ms (−37%, 1.58x). No new
+  `unsafe`; clean-room (Ut Video `spec/` + own source only).
+
 ### Added
 
 - **Round 335 — opt-in strict-decode trailing-padding verification

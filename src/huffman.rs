@@ -271,7 +271,123 @@ impl HuffmanTable {
             v
         };
 
-        for px in 0..n_pixels {
+        // --- Fast accumulator-driven LUT loop -------------------------
+        //
+        // The per-pixel `BitReader::peek_bits` path recomputes the word
+        // index and reloads the backing word from raw bytes on *every*
+        // symbol. For a dense plane that is the dominant decode cost.
+        //
+        // Instead, hold the next bits in a left-aligned 64-bit register
+        // (`acc`, valid bits at the MSB end; `acc_len` = how many are
+        // valid). Each symbol becomes: top-`LUT_BITS` mask → LUT lookup
+        // → drop `len` bits. Words are pulled in 32 at a time, MSB-first
+        // within each LE word, so the register's bit order is byte-for-
+        // byte identical to what `peek_bits` would have produced.
+        //
+        // The fast loop only runs while we can *prove* the next symbol
+        // resolves on the LUT without touching past-end zero-padding:
+        // we require `acc_len >= LUT_BITS` and the refill never claims
+        // more bits than `total_bits` actually provides. The instant
+        // either guarantee fails (low tail, or a LUT-miss long code) we
+        // sync `br` to the consumed position and fall through to the
+        // exact-semantics slow path below for that pixel, then re-prime.
+        let total_bits = br.total_bits();
+        let total_words = slice_data.len() / 4; // whole 32-bit words only
+        let max_len = self.max_len as u32;
+        let mut acc: u64 = 0;
+        let mut acc_len: u32 = 0;
+        let mut next_word: usize = 0; // index of next 32-bit word to load
+        let mut consumed: usize = 0; // absolute bits consumed (== br cursor)
+        let mut px = 0usize;
+
+        // Helper-free refill is inlined below to keep `acc`/`acc_len`
+        // in registers across the loop body. The fast loop only stays in
+        // flight while it holds at least `max_len` *real* buffered bits —
+        // enough to resolve ANY code (LUT hit or long-code tier scan)
+        // without reading into the (zero) padding tail. Once the buffer
+        // can no longer guarantee that, it breaks to the exact-semantics
+        // slow path below, which handles the final sub-`max_len` tail
+        // with the original `peek_bits` zero-extension behaviour.
+        'fast: while px < n_pixels {
+            // Refill: pull whole 32-bit words into the high end of `acc`
+            // until we hold more than 32 valid bits, or run out of whole
+            // words. We never load the partial tail word here.
+            while acc_len <= 32 && next_word < total_words {
+                let byte_off = next_word * 4;
+                let w = u32::from_le_bytes([
+                    slice_data[byte_off],
+                    slice_data[byte_off + 1],
+                    slice_data[byte_off + 2],
+                    slice_data[byte_off + 3],
+                ]);
+                acc |= (w as u64) << (32 - acc_len);
+                acc_len += 32;
+                next_word += 1;
+            }
+
+            if acc_len < max_len {
+                // Cannot guarantee a full-length code resolves from the
+                // buffered (non-padding) bits. Hand the tail to the slow
+                // path, which mirrors the original zero-extension reads.
+                break 'fast;
+            }
+
+            // Top `LUT_BITS` bits, right-aligned, as the LUT key.
+            let key = (acc >> (64 - LUT_BITS as u32)) as usize;
+            let entry = self.lut[key];
+            let (sym, l) = if entry.len <= LUT_BITS {
+                (entry.sym, entry.len as u32)
+            } else {
+                // Long code (> LUT_BITS): length-tier prefix scan over the
+                // buffered accumulator bits. `acc_len >= max_len` here, so
+                // every candidate length fits without past-end reads.
+                let mut found: Option<(u8, u32)> = None;
+                for (tl, tier) in &tiers {
+                    let tl = *tl as u32;
+                    if tl <= LUT_BITS as u32 {
+                        // Codes this short were already covered by the LUT
+                        // (a miss means the real code is longer); skip.
+                        continue;
+                    }
+                    let candidate = (acc >> (64 - tl)) as u32;
+                    if let Ok(idx) = tier.binary_search_by(|probe| probe.1.cmp(&candidate)) {
+                        found = Some((tier[idx].2, tl));
+                        break;
+                    }
+                }
+                match found {
+                    Some(v) => v,
+                    None => {
+                        br.consume_bits(consumed);
+                        return Err(Error::HuffmanDecodeFailure {
+                            bit_position: consumed,
+                        });
+                    }
+                }
+            };
+            // Bounds: the symbol's true length must fit in the unread
+            // tail of the *whole* stream (matches the original guard).
+            if consumed + (l as usize) > total_bits {
+                br.consume_bits(consumed);
+                return Err(Error::SliceTruncated {
+                    bit_position: consumed,
+                    expected_pixels: n_pixels,
+                    decoded: px,
+                });
+            }
+            out.push(sym);
+            acc <<= l;
+            acc_len -= l;
+            consumed += l as usize;
+            px += 1;
+        }
+
+        // Sync the bit reader to the fast loop's consumed position so the
+        // slow path resumes with byte-identical state.
+        br = BitReader::new(slice_data);
+        br.consume_bits(consumed);
+
+        for px in px..n_pixels {
             let bp_start = br.position();
 
             // Fast LUT path: peek the next `LUT_BITS` bits if available.
