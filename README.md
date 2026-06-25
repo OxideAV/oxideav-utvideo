@@ -82,7 +82,13 @@ rejection suite, criterion benchmarks (`benches/`), and four
 `inspect_utvideo`, `huffman_codec`) that exercise the decode, encode,
 inspector, and Huffman-codebook surfaces for panic-freedom and
 cross-surface invariant agreement, each with a deterministic stable-CI
-mirror. Fixture reference output is produced by black-box invocations
+mirror. The decode-free inspector's Kraft accessors are hardened against
+the full `spec/05` §7.2 wire range of code lengths (`1..=254`): a
+malformed descriptor declaring a code length past the 128-bit shift
+boundary is handled with saturating `kraft_numerator` arithmetic and a
+node-merge `is_kraft_complete` predicate that never materialises `2^max`,
+so the byte-walk stays panic-free on any descriptor a decoder would
+reject. Fixture reference output is produced by black-box invocations
 of a validator binary; no third-party codec library source is consulted
 at any stage.
 
