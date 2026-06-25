@@ -303,31 +303,26 @@ fn assert_typed_accessor_invariants(layout: &oxideav_utvideo::FrameLayout) {
         // For an in-corpus codebook (`spec/05` §6.2 max code length 8-9)
         // the `2^max` denominator fits a u128 and completeness is exactly
         // `kn == 1u128 << max`. A malformed descriptor may drive
-        // `max_code_length` up to the §7.2 wire bound of 254, where both
-        // `1u128 << max` and the true numerator are unrepresentable
-        // (`kraft_numerator` saturates to u128::MAX, `is_kraft_complete`
-        // decides equality by a node merge). Guard the shift so this
-        // mirror stays panic-free on the same shapes the fuzz target sees.
-        let expected_complete = if plane.is_single_symbol {
-            true
-        } else if hist.is_empty() {
-            false
-        } else if plane.max_code_length < 128 {
-            kn == 1u128 << plane.max_code_length
-        } else {
+        // `max_code_length` up to the §7.2 wire bound of 254, where
+        // `1u128 << max` is unrepresentable; only exercise the closed-form
+        // identity when `max < 128`. For `max >= 128`, completeness is
+        // defined solely by the overflow-free node-merge predicate, and
+        // the numerator there may be exact (a lone max-tier byte gives
+        // `2^0 == 1`) or saturated, so no fixed numerator value applies.
+        if plane.max_code_length < 128 {
+            let expected_complete = if plane.is_single_symbol {
+                true
+            } else if hist.is_empty() {
+                false
+            } else {
+                kn == 1u128 << plane.max_code_length
+            };
             assert_eq!(
-                kn,
-                u128::MAX,
-                "plane {p}: numerator must saturate when max_code_length {} >= 128",
-                plane.max_code_length
+                plane.is_kraft_complete(),
+                expected_complete,
+                "plane {p}: is_kraft_complete disagrees with kraft_numerator arithmetic"
             );
-            plane.is_kraft_complete()
-        };
-        assert_eq!(
-            plane.is_kraft_complete(),
-            expected_complete,
-            "plane {p}: is_kraft_complete disagrees with kraft_numerator arithmetic"
-        );
+        }
 
         // Per-plane geometry identities (`spec/02` §5).
         assert_eq!(

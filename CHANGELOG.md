@@ -40,12 +40,19 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deterministic mirror in `tests/round228_inspect_fuzz_properties.rs`
   asserted `kraft_numerator() == 1u128 << max_code_length` — which itself
   panics with "shift left with overflow" once a malformed descriptor
-  drives `max_code_length >= 128` (`spec/05` §7.2). Both now guard the
-  shift: for `max < 128` they keep the exact `1u128 << max` identity, and
-  for `max >= 128` they assert the documented `u128::MAX` numerator
-  saturation sentinel and defer the completeness value to the node-merge
-  predicate. The harness can no longer panic *itself* on the shapes it is
-  meant to prove the inspector survives.
+  drives `max_code_length >= 128` (`spec/05` §7.2). Both now only
+  exercise the closed-form numerator identity when `max < 128` (where
+  both sides fit a u128); for `max >= 128`, where `2^max` is
+  unrepresentable, completeness is defined solely by the overflow-free
+  node-merge predicate (`is_kraft_complete`) and **no** numerator value
+  is asserted. A `max >= 128` descriptor does **not** imply a saturated
+  numerator — a lone byte at the max tier gives the exact value
+  `2^(max-max) == 1` — so the harness must not pin `kraft_numerator()`
+  to `u128::MAX` on that path (the real fuzz crash had
+  `max_code_length == 239` with `kraft_numerator() == 1`). The harness
+  can no longer panic *itself* on the shapes it is meant to prove the
+  inspector survives. Validated by replaying the captured crash artifact
+  (`max_code_length == 239`, single histogram tier) panic-free.
 
 ### Performance
 

@@ -297,36 +297,29 @@ fuzz_target!(|data: &[u8]| {
             // is exactly `kn == 1u128 << max_code_length`. The wire format
             // (`spec/05` §7.2) permits code lengths up to 254, though, so
             // a malformed descriptor can drive `max_code_length` past 127,
-            // at which point both `1u128 << max` *and* the true numerator
-            // are unrepresentable: `kraft_numerator` saturates to
-            // `u128::MAX` and `is_kraft_complete` decides equality by a
-            // node merge that never materialises `2^max`. Guard the shift
-            // so the harness itself stays panic-free, and on the
-            // saturating path only assert the documented saturation
-            // sentinel rather than a value that cannot be formed.
-            let expected_complete = if plane.is_single_symbol {
-                true
-            } else if hist.is_empty() {
-                false
-            } else if plane.max_code_length < 128 {
-                kn == 1u128 << plane.max_code_length
-            } else {
-                // `2^max` is out of u128 range; the numerator must have
-                // saturated. Trust the node-merge predicate for the
-                // completeness value (cross-checked structurally below).
+            // at which point `1u128 << max` is unrepresentable. Only
+            // exercise the closed-form numerator identity when both sides
+            // fit a u128 (`max < 128`). For `max >= 128`, `2^max` cannot
+            // be formed at all, so completeness is defined solely by the
+            // overflow-free node-merge predicate (`is_kraft_complete`,
+            // pinned panic-free in `round370_kraft_overflow`); the
+            // numerator there may be exact (e.g. a lone byte at the max
+            // tier gives `2^0 == 1`) *or* saturated (`u128::MAX`), so no
+            // fixed numerator value can be asserted on that path.
+            if plane.max_code_length < 128 {
+                let expected_complete = if plane.is_single_symbol {
+                    true
+                } else if hist.is_empty() {
+                    false
+                } else {
+                    kn == 1u128 << plane.max_code_length
+                };
                 assert_eq!(
-                    kn,
-                    u128::MAX,
-                    "plane {p}: numerator must saturate when max_code_length {} >= 128",
-                    plane.max_code_length
+                    plane.is_kraft_complete(),
+                    expected_complete,
+                    "plane {p}: is_kraft_complete disagrees with kraft_numerator arithmetic"
                 );
-                plane.is_kraft_complete()
-            };
-            assert_eq!(
-                plane.is_kraft_complete(),
-                expected_complete,
-                "plane {p}: is_kraft_complete disagrees with kraft_numerator arithmetic"
-            );
+            }
 
             // --- per-plane geometry identities (`spec/02` §5) ---
             assert_eq!(
