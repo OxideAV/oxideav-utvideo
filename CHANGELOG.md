@@ -6,6 +6,35 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Inspector Kraft accessors stay panic-free on out-of-corpus large
+  code-length descriptors.** `spec/05` §7.2 permits a descriptor byte to
+  carry any code length in `1..=254` (only `0`/`255` are sentinels), so a
+  hostile or corrupt descriptor can drive a plane's `max_code_length` up
+  to 254 — far beyond the 8–9 reported for realistic input (§6.2). Two
+  decode-free `inspect::PlaneLayout` accessors overflowed on such bytes:
+  `kraft_numerator` computed `count << (max - len)` in a `u128`, which
+  panics with "attempt to shift left with overflow" once a tier has
+  `max - len >= 128`; and `is_kraft_complete` compared against
+  `1u128 << max_code_length`, itself unrepresentable past `max == 127`.
+  `kraft_numerator` now accumulates with checked shifts/adds and
+  saturates to `u128::MAX` when a term or the running sum would exceed
+  the 128-bit range (the value stays exact for every in-corpus codebook).
+  `is_kraft_complete` now decides Kraft equality by a bottom-up
+  binary-tree node merge over the code-length histogram — pairing sibling
+  nodes up the tiers from `max_code_length` to the root — which needs no
+  `2^max` materialisation and is exact for any `max` in the `1..=254`
+  wire range. Output is unchanged for every well-formed descriptor; the
+  fix only affects the previously-panicking malformed-input path. New
+  `tests/round370_kraft_overflow.rs` pins panic-freedom across the `8`,
+  `16`, `64`, `100`, `127`, `128`, `129`, `200`, `253`, `254` boundary
+  lengths plus a saturating multi-tier numerator and a genuinely
+  Kraft-complete deep (max-200) descriptor. Resolves the scheduled
+  `inspect_utvideo` cargo-fuzz crash at `src/inspect.rs:438`
+  ("shift left with overflow"). Clean-room (Ut Video `spec/05` §§2.2,
+  6.2, 7.2 + own source only).
+
 ### Performance
 
 - **Accumulator-driven Huffman slice decode (~1.5x full-frame).** The

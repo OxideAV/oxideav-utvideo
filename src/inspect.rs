@@ -426,17 +426,53 @@ impl PlaneLayout {
     /// as `Error::KraftViolation` on failure, `spec/05` §2.2), available
     /// here decode-free from the on-wire descriptor alone.
     ///
-    /// The result is exact: every term `count · 2^(max - L)` is a
-    /// non-negative integer, and the sum is bounded by
-    /// `active_symbol_count · 2^max_code_length <= 256 · 2^254`, so the
-    /// accumulation is done in `u128` to stay overflow-safe on the
-    /// `spec/05` §7.2 wire upper bound of `max_code_length == 254`.
+    /// Every term `count · 2^(max - L)` is a non-negative integer. For
+    /// realistic descriptors (`spec/05` §6.2 reports max code lengths of
+    /// 8–9 from natural input, and a flat 256-symbol length-8 codebook
+    /// caps a single tier at `256 · 2^7`), the whole sum fits a `u128`
+    /// comfortably and the result is exact. The `spec/05` §7.2 *wire*
+    /// upper bound is far larger — a descriptor byte may carry any code
+    /// length in `1..=254`, so a hostile or corrupt descriptor can drive
+    /// `max_code_length` up to 254, at which point a single term
+    /// `2^(max - L)` already exceeds the 128-bit range. To stay
+    /// panic-free on attacker-shaped bytes (the inspector is a
+    /// decode-free byte-walk that does **not** reject a malformed
+    /// descriptor), the accumulation is computed with checked shifts and
+    /// additions and **saturates to [`u128::MAX`]** the moment a term or
+    /// the running sum would overflow. A saturated return is therefore a
+    /// sentinel for "numerator too large to represent" and never a
+    /// legitimate Kraft-equality value (Kraft equality needs the
+    /// numerator to equal `2^max_code_length`, which is itself
+    /// unrepresentable once `max_code_length >= 128` — see
+    /// [`is_kraft_complete`], which tests completeness exactly without
+    /// materialising `2^max`). For any in-corpus codebook the value is
+    /// the exact integer numerator.
+    ///
+    /// [`is_kraft_complete`]: PlaneLayout::is_kraft_complete
     pub fn kraft_numerator(&self) -> u128 {
         let max = self.max_code_length;
-        self.code_length_histogram
-            .iter()
-            .map(|&(len, count)| u128::from(count) << (max - len))
-            .sum()
+        let mut sum: u128 = 0;
+        for &(len, count) in &self.code_length_histogram {
+            // `len <= max` holds by construction (`max_code_length` is
+            // the running max over the same active bytes the histogram
+            // tiers), so `max - len` does not underflow; but `max - len`
+            // can be up to 253, overflowing a 128-bit shift. Use a
+            // checked shift + checked add and saturate on overflow.
+            let shift = u32::from(max - len);
+            let term = match u128::from(count).checked_shl(shift) {
+                // `checked_shl` only masks the shift amount; an actual
+                // value overflow (a 1-bit shifted past bit 127) is not
+                // caught by it, so verify the shift amount is in range
+                // *and* that the multiply did not drop high bits.
+                Some(t) if shift < 128 && (t >> shift) == u128::from(count) => t,
+                _ => return u128::MAX,
+            };
+            match sum.checked_add(term) {
+                Some(s) => sum = s,
+                None => return u128::MAX,
+            }
+        }
+        sum
     }
 
     /// Decode-free predicate: does this plane's 256-byte Huffman
@@ -491,7 +527,51 @@ impl PlaneLayout {
         if self.code_length_histogram.is_empty() {
             return false;
         }
-        self.kraft_numerator() == 1u128 << self.max_code_length
+        // Test Kraft **equality** by the bottom-up binary-tree node merge
+        // rather than `kraft_numerator() == 2^max`, which is
+        // unrepresentable once `max_code_length >= 128` (`spec/05` §7.2
+        // permits code lengths up to 254). Walk the length tiers from the
+        // deepest (`max_code_length`) toward the root: at each depth the
+        // running node count is the number of tree nodes that must be
+        // accounted for at that level; two sibling nodes merge into one
+        // parent at the next-shallower depth, so the count must be even
+        // before each ascent (an odd count is an unpaired leaf — the code
+        // is *incomplete*), and a count exceeding the slots available at
+        // a depth is *over-subscribed*. The histogram is ascending by
+        // length, so iterate it in reverse to descend the tiers from
+        // `max` down to `min`. The code is complete iff exactly one node
+        // (the root) remains after merging up past the shallowest tier.
+        //
+        // `nodes` is bounded by `active_symbol_count <= 256` at the
+        // deepest tier and only ever halves-then-adds while ascending, so
+        // it never exceeds 256 and the arithmetic is overflow-free for
+        // any `max_code_length` in the `1..=254` wire range.
+        let hist = &self.code_length_histogram;
+        let mut nodes: u32 = 0;
+        let mut depth = self.max_code_length;
+        let mut idx = hist.len();
+        loop {
+            // Fold in every tier sitting exactly at `depth`.
+            while idx > 0 && hist[idx - 1].0 == depth {
+                nodes += hist[idx - 1].1;
+                idx -= 1;
+            }
+            if depth == 0 {
+                break;
+            }
+            // Ascend one level: pair siblings into parents. An odd count
+            // leaves an unpaired leaf — not a complete code.
+            if nodes % 2 != 0 {
+                return false;
+            }
+            nodes /= 2;
+            depth -= 1;
+        }
+        // After merging past depth 0 the tree is complete iff a single
+        // root node remains. (All active tiers have `len >= 1`, so the
+        // loop always performs at least one ascent before reaching
+        // `depth == 0`.)
+        nodes == 1
     }
 }
 
