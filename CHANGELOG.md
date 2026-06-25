@@ -34,6 +34,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `inspect_utvideo` cargo-fuzz crash at `src/inspect.rs:438`
   ("shift left with overflow"). Clean-room (Ut Video `spec/05` §§2.2,
   6.2, 7.2 + own source only).
+- **`inspect_utvideo` fuzz harness + its stable-CI mirror no longer
+  panic on the same large-`max_code_length` shapes.** The Property-4
+  Kraft cross-check in `fuzz/fuzz_targets/inspect_utvideo.rs` and its
+  deterministic mirror in `tests/round228_inspect_fuzz_properties.rs`
+  asserted `kraft_numerator() == 1u128 << max_code_length` — which itself
+  panics with "shift left with overflow" once a malformed descriptor
+  drives `max_code_length >= 128` (`spec/05` §7.2). Both now guard the
+  shift: for `max < 128` they keep the exact `1u128 << max` identity, and
+  for `max >= 128` they assert the documented `u128::MAX` numerator
+  saturation sentinel and defer the completeness value to the node-merge
+  predicate. The harness can no longer panic *itself* on the shapes it is
+  meant to prove the inspector survives.
 
 ### Performance
 

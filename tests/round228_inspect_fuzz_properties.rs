@@ -300,12 +300,28 @@ fn assert_typed_accessor_invariants(layout: &oxideav_utvideo::FrameLayout) {
             hist.is_empty(),
             "plane {p}: kraft_numerator-zero / histogram-empty disagreement"
         );
+        // For an in-corpus codebook (`spec/05` §6.2 max code length 8-9)
+        // the `2^max` denominator fits a u128 and completeness is exactly
+        // `kn == 1u128 << max`. A malformed descriptor may drive
+        // `max_code_length` up to the §7.2 wire bound of 254, where both
+        // `1u128 << max` and the true numerator are unrepresentable
+        // (`kraft_numerator` saturates to u128::MAX, `is_kraft_complete`
+        // decides equality by a node merge). Guard the shift so this
+        // mirror stays panic-free on the same shapes the fuzz target sees.
         let expected_complete = if plane.is_single_symbol {
             true
         } else if hist.is_empty() {
             false
-        } else {
+        } else if plane.max_code_length < 128 {
             kn == 1u128 << plane.max_code_length
+        } else {
+            assert_eq!(
+                kn,
+                u128::MAX,
+                "plane {p}: numerator must saturate when max_code_length {} >= 128",
+                plane.max_code_length
+            );
+            plane.is_kraft_complete()
         };
         assert_eq!(
             plane.is_kraft_complete(),

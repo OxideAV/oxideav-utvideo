@@ -292,12 +292,35 @@ fuzz_target!(|data: &[u8]| {
                 "plane {p}: kraft_numerator-zero / histogram-empty disagreement"
             );
             // is_kraft_complete agrees with the documented arithmetic.
+            // For an in-corpus codebook (`spec/05` §6.2: max code length
+            // 8-9) the `2^max` denominator fits a u128 and the predicate
+            // is exactly `kn == 1u128 << max_code_length`. The wire format
+            // (`spec/05` §7.2) permits code lengths up to 254, though, so
+            // a malformed descriptor can drive `max_code_length` past 127,
+            // at which point both `1u128 << max` *and* the true numerator
+            // are unrepresentable: `kraft_numerator` saturates to
+            // `u128::MAX` and `is_kraft_complete` decides equality by a
+            // node merge that never materialises `2^max`. Guard the shift
+            // so the harness itself stays panic-free, and on the
+            // saturating path only assert the documented saturation
+            // sentinel rather than a value that cannot be formed.
             let expected_complete = if plane.is_single_symbol {
                 true
             } else if hist.is_empty() {
                 false
-            } else {
+            } else if plane.max_code_length < 128 {
                 kn == 1u128 << plane.max_code_length
+            } else {
+                // `2^max` is out of u128 range; the numerator must have
+                // saturated. Trust the node-merge predicate for the
+                // completeness value (cross-checked structurally below).
+                assert_eq!(
+                    kn,
+                    u128::MAX,
+                    "plane {p}: numerator must saturate when max_code_length {} >= 128",
+                    plane.max_code_length
+                );
+                plane.is_kraft_complete()
             };
             assert_eq!(
                 plane.is_kraft_complete(),
