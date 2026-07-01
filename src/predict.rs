@@ -15,18 +15,34 @@
 
 use crate::fourcc::Predictor;
 
-/// JPEG-LS MED helper. `P = clip_to_[min(A,B), max(A,B)] (A+B-C)`.
+/// Ut Video median predictor (`spec/04` §5.0):
+/// `P = median(A, B, (A + B - C) mod 256)`.
+///
+/// The third argument to the median is the *modular* gradient
+/// `G = (A + B - C) mod 256`, **not** the raw top-left `C`. In real
+/// arithmetic `median(A, B, A+B-C)` collapses to the JPEG-LS T.87 MED
+/// `clip_[min(A,B), max(A,B)](A+B-C)`, so the two agree whenever
+/// `A + B - C` stays inside `0..=255`. They **diverge** the moment the
+/// gradient overflows or underflows the byte range: the reference
+/// codec reduces `A+B-C` modulo 256 first and then takes the median of
+/// the three bytes, which the clip form cannot reproduce (a clip can
+/// only ever return `A`, `B`, or the in-range gradient, never a wrapped
+/// value that lands outside `[min(A,B), max(A,B)]`). `spec/04` §5.0
+/// calls this out explicitly ("one of the JPEG-LS family of predictors
+/// but **not** the JPEG-LS MED defined in ITU-T T.87 §A.2").
 #[inline]
 fn med(a: u8, b: u8, c: u8) -> u8 {
-    let max = a.max(b);
-    let min = a.min(b);
-    if c >= max {
-        min
-    } else if c <= min {
-        max
-    } else {
-        a.wrapping_add(b).wrapping_sub(c)
-    }
+    let g = a.wrapping_add(b).wrapping_sub(c);
+    median3(a, b, g)
+}
+
+/// Median of three bytes. `a + b + c - max - min`, computed in `u16`
+/// so the intermediate sum (`<= 765`) cannot overflow.
+#[inline]
+fn median3(a: u8, b: u8, c: u8) -> u8 {
+    let hi = a.max(b).max(c);
+    let lo = a.min(b).min(c);
+    (a as u16 + b as u16 + c as u16 - hi as u16 - lo as u16) as u8
 }
 
 /// Inverse-predict one slice's residuals into a `slice_rows x W` buffer.
@@ -596,6 +612,29 @@ mod tests {
         inverse_decorrelate_rgb(&g, &mut b, &mut r);
         assert_eq!(b, b0);
         assert_eq!(r, r0);
+    }
+
+    #[test]
+    fn median_uses_modular_gradient_not_clip() {
+        // `spec/04` §5.0: Ut Video median is `median(A, B, (A+B-C) mod 256)`,
+        // which diverges from the JPEG-LS T.87 clip predictor exactly when
+        // the gradient `A+B-C` leaves the byte range. Concrete wrap case
+        // (from the `uly0_median_grad_s1` reference frame at row 3 col 31):
+        // A=249, B=243, C=236 → A+B-C = 256 → mod 0 → median(249,243,0)=243.
+        // The clip form would instead return max(A,B)=249 because
+        // C=236 <= min(A,B)=243.
+        assert_eq!(med(249, 243, 236), 243);
+        assert_eq!(median3(249, 243, 0), 243);
+
+        // Underflow wrap: A=2, B=1, C=200 → 2+1-200 = -197 ≡ 59 (mod 256).
+        // median(2, 1, 59) = 2. The clip form returns max(A,B)=2 here too,
+        // so pick a case where they part: A=10, B=20, C=250 → 10+20-250 =
+        // -220 ≡ 36 → median(10,20,36)=20; clip → C=250>=max(20) → min=10.
+        assert_eq!(med(10, 20, 250), 20);
+
+        // No-wrap agreement with clip: A=100, B=120, C=110 → 110 in range
+        // → median(100,120,110)=110 == clip(A+B-C)=110.
+        assert_eq!(med(100, 120, 110), 110);
     }
 
     #[test]

@@ -8,6 +8,54 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Median predictor (mode 3) now matches the reference on gradient
+  wrap-around.** `spec/04` §5.0 pins the Ut Video median as
+  `P = median(A, B, (A + B - C) mod 256)` — a median of three bytes
+  whose third term is the gradient reduced **modulo 256**. The prior
+  implementation used the JPEG-LS T.87 `MED` clip
+  (`clip_[min(A,B), max(A,B)](A + B - C)`), which is algebraically
+  identical **only** while `A + B - C` stays inside `0..=255`; the two
+  diverge the moment the gradient overflows or underflows the byte
+  range (the clip form can never return a wrapped value outside
+  `[min(A,B), max(A,B)]`, whereas the reference codec can). Because the
+  forward and inverse paths shared the same clip helper, every
+  self-round-trip stayed internally consistent and the divergence went
+  unnoticed for the crate's whole history. The new
+  `tests/round382_reference_decode.rs` golden corpus — pre-extracted
+  reference `00dc` frame bodies with reference-decoder pixel
+  ground-truth — caught it on the very first median fixture
+  (`uly0_median_grad_s1`, plane Y row 3 col 31: A=249, B=243, C=236,
+  gradient `256 → 0`, reference `median(249,243,0)=243` vs. the old
+  clip's `249`). `predict::med` now computes
+  `median3(A, B, (A + B - C) mod 256)` for both the interior and the
+  column-0 continuous-wrap edge, and both the forward and inverse
+  median paths pick it up. A `predict::median_uses_modular_gradient_not_clip`
+  unit test pins three wrap cases plus a no-wrap agreement case.
+
+### Added
+
+- **Reference-stream golden decode conformance corpus.** Until now
+  every test was a *self*-round-trip (encode with the in-crate encoder,
+  decode with the in-crate decoder) — which proves the two are mutually
+  inverse but cannot catch a bug that is symmetric across our own
+  encode/decode (as the median clip bug above demonstrated).
+  `tests/round382_reference_decode.rs` adds 14 pre-extracted reference
+  Ut Video frame bodies (`00dc` chunk payloads, `spec/02` §1) with their
+  16-byte wire extradata (`spec/01` §2) and reference-decoder pixel
+  ground-truth, committed as static bytes under
+  `tests/fixtures/reference/` so the test is pure Rust with no external
+  binary at build or CI time (fixtures produced offline by a black-box
+  validator invoked purely as an opaque I/O oracle). Coverage spans all
+  five FourCCs (`ULY0`/`ULY2`/`ULY4`/`ULRG`/`ULRA`), the three
+  reference-encoder-supported predictors (none / left / median), single-
+  and multi-slice frames (1/2/4), and low-entropy / ramp / high-entropy
+  content exercising the single-symbol fast path (`spec/05` §6.1), the
+  dense Huffman LUT, and the long-code tier-scan fallback (`spec/05`
+  §7). Each frame's decoded planes must equal the reference pixel bytes
+  byte-for-byte.
+
+### Fixed (earlier)
+
 - **Inspector Kraft accessors stay panic-free on out-of-corpus large
   code-length descriptors.** `spec/05` §7.2 permits a descriptor byte to
   carry any code length in `1..=254` (only `0`/`255` are sentinels), so a
