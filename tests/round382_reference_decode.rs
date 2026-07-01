@@ -34,7 +34,11 @@
 //! fast path (`spec/05` §6.1), the dense Huffman LUT, and the long-code
 //! tier-scan fallback (`spec/05` §7).
 
-use oxideav_utvideo::{decode_frame, Extradata, Fourcc, Predictor, StreamConfig};
+use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
+use oxideav_utvideo::{
+    decode_frame, decode_frame_strict, peek_frame, peek_frame_info, Extradata, Fourcc, Predictor,
+    StreamConfig,
+};
 
 struct Fixture {
     name: &'static str,
@@ -152,5 +156,190 @@ fn every_reference_frame_decodes_byte_exact() {
                 fx.name, at, got[at], fx.pixels[at]
             );
         }
+    }
+}
+
+/// Reference frame bodies are produced by a spec-conformant encoder, so
+/// every slice's bit stream is zero-padded to its 32-bit word boundary
+/// (`spec/05` §4.3). The opt-in strict decoder ([`decode_frame_strict`])
+/// must therefore accept every fixture *and* return output byte-identical
+/// to the lenient path — a real stream must never trip
+/// [`oxideav_utvideo::Error::NonZeroPadding`].
+#[test]
+fn strict_decode_accepts_every_reference_frame() {
+    for fx in CORPUS {
+        let cfg = config_for(fx);
+        let lenient = decode_frame(&cfg, fx.chunk).unwrap();
+        let strict = decode_frame_strict(&cfg, fx.chunk).unwrap_or_else(|e| {
+            panic!("{}: strict decode rejected a reference frame: {e}", fx.name)
+        });
+        assert_eq!(
+            strict, lenient,
+            "{}: strict decode diverged from lenient decode",
+            fx.name
+        );
+        assert_eq!(
+            concat_planes(&strict.planes),
+            fx.pixels,
+            "{}: strict decode pixels",
+            fx.name
+        );
+    }
+}
+
+/// The serial and parallel decode paths are documented as bit-exact
+/// equivalents (`decoder` module docs; `spec/02` §7 "Implementation
+/// notes" on per-slice independence). Both must reproduce the reference
+/// pixels exactly on every fixture, including the genuinely multi-slice
+/// frames (`*_s2`, `*_s4`) where the parallel fan-out actually splits
+/// work across threads.
+#[test]
+fn serial_and_parallel_paths_reproduce_reference() {
+    for fx in CORPUS {
+        let cfg = config_for(fx);
+        let serial = decode_frame_serial(&cfg, fx.chunk).unwrap();
+        let parallel = decode_frame_parallel(&cfg, fx.chunk).unwrap();
+        assert_eq!(
+            serial, parallel,
+            "{}: serial vs parallel divergence",
+            fx.name
+        );
+        assert_eq!(
+            concat_planes(&serial.planes),
+            fx.pixels,
+            "{}: serial path pixels",
+            fx.name
+        );
+    }
+}
+
+/// Cross-validate the decode-free [`peek_frame`] inspector against a
+/// real decode of the same reference stream: the byte-walk must recover
+/// the same plane geometry, the same per-slice row partitioning
+/// (`spec/02` §5.2), and Huffman-descriptor primitives that stay within
+/// the spec's wire bounds — all without building a Huffman table or
+/// decoding a single residual.
+#[test]
+fn inspector_layout_agrees_with_reference_decode() {
+    for fx in CORPUS {
+        let cfg = config_for(fx);
+        let decoded = decode_frame(&cfg, fx.chunk).unwrap();
+        let layout = peek_frame(&cfg, fx.chunk)
+            .unwrap_or_else(|e| panic!("{}: peek_frame failed: {e}", fx.name));
+
+        // Frame-info / predictor recovered decode-free must match the
+        // full decode (`spec/02` §6.1).
+        let (fi, pred) = peek_frame_info(fx.chunk).unwrap();
+        assert_eq!(fi, decoded.frame_info, "{}: peek frame_info", fx.name);
+        assert_eq!(pred, decoded.predictor, "{}: peek predictor", fx.name);
+
+        assert_eq!(
+            layout.num_slices, fx.num_slices,
+            "{}: layout slices",
+            fx.name
+        );
+        assert_eq!(
+            layout.planes.len(),
+            decoded.planes.len(),
+            "{}: layout plane count",
+            fx.name
+        );
+
+        for (pl, dp) in layout.planes.iter().zip(decoded.planes.iter()) {
+            assert_eq!(pl.width, dp.width, "{}: plane width", fx.name);
+            assert_eq!(pl.height, dp.height, "{}: plane height", fx.name);
+            assert_eq!(
+                pl.slices.len(),
+                fx.num_slices,
+                "{}: plane slice count",
+                fx.name
+            );
+
+            // Per-slice row partitioning must tile the plane exactly and
+            // the per-slice pixel counts must sum to the plane area
+            // (`spec/02` §5.2).
+            let mut expect_row = 0u32;
+            let mut total_px = 0u32;
+            for (s_idx, s) in pl.slices.iter().enumerate() {
+                assert_eq!(
+                    s.row_start, expect_row,
+                    "{}: plane {} slice {} row_start",
+                    fx.name, pl.plane_idx, s_idx
+                );
+                let want_end = (pl.height as usize * (s_idx + 1) / fx.num_slices) as u32;
+                assert_eq!(
+                    s.row_end, want_end,
+                    "{}: plane {} slice {} row_end",
+                    fx.name, pl.plane_idx, s_idx
+                );
+                assert_eq!(
+                    s.pixel_count,
+                    s.row_count() * pl.width,
+                    "{}: plane {} slice {} pixel_count",
+                    fx.name,
+                    pl.plane_idx,
+                    s_idx
+                );
+                expect_row = s.row_end;
+                total_px += s.pixel_count;
+            }
+            assert_eq!(expect_row, pl.height, "{}: slice rows tile height", fx.name);
+            assert_eq!(
+                total_px,
+                pl.width * pl.height,
+                "{}: slice pixel_count sum",
+                fx.name
+            );
+
+            // Descriptor primitives stay inside the spec wire bounds
+            // (`spec/05` §2.1, §7.1); a single-symbol plane carries no
+            // active code lengths (`spec/05` §6.1).
+            assert!(
+                pl.max_code_length <= 254,
+                "{}: max_code_length wire bound",
+                fx.name
+            );
+            if pl.is_single_symbol {
+                assert_eq!(
+                    pl.active_symbol_count, 0,
+                    "{}: single-symbol active count",
+                    fx.name
+                );
+                assert_eq!(pl.max_code_length, 0, "{}: single-symbol max len", fx.name);
+            } else {
+                assert!(
+                    pl.min_code_length <= pl.max_code_length,
+                    "{}: min<=max code length",
+                    fx.name
+                );
+            }
+        }
+    }
+}
+
+/// The `uly4_none_solid_s1` fixture is a constant-per-plane input under
+/// the identity predictor, so every plane collapses to the single-symbol
+/// fast path (`spec/05` §6.1): a lone `code_length = 0` sentinel and
+/// zero slice-data bytes. This pins that the inspector recognises the
+/// mode on a real reference stream (not just synthesised descriptors).
+#[test]
+fn solid_reference_frame_is_all_single_symbol() {
+    let fx = CORPUS
+        .iter()
+        .find(|f| f.name == "uly4_none_solid_s1")
+        .unwrap();
+    let cfg = config_for(fx);
+    let layout = peek_frame(&cfg, fx.chunk).unwrap();
+    for pl in &layout.planes {
+        assert!(
+            pl.is_single_symbol,
+            "solid frame plane {} should be single-symbol",
+            pl.plane_idx
+        );
+        assert_eq!(
+            pl.slices[0].len(),
+            0,
+            "single-symbol plane carries no slice data"
+        );
     }
 }
