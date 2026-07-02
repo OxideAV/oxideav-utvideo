@@ -589,3 +589,82 @@ fn slice_count_128_interop_stream_decodes_byte_exact() {
         "128-slice serial vs parallel"
     );
 }
+
+/// The `fuzz/corpus/{decode,inspect}_utvideo/seed_ref_*` files are
+/// reference frame bodies prefixed with the 4-byte header the fuzz
+/// harnesses parse (FourCC selector, width/height seeds mapped via
+/// `((seed % 64) + 2) & !1`, slice-count seed `% 16 + 1`). Committed so
+/// a cold `cargo fuzz run` starts from genuine Kraft-valid descriptors
+/// and dense Huffman payloads the mutator cannot cheaply synthesise.
+///
+/// This test pins that every committed seed still *reaches the deep
+/// decode path*: applying the harness's documented header mapping must
+/// reproduce the fixture's true geometry, and decoding the payload must
+/// yield the reference pixels. If a future round changes the harness
+/// header mapping, this fails loudly instead of letting the seeds decay
+/// into early-reject inputs.
+#[test]
+fn fuzz_seed_corpus_reaches_deep_decode() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus");
+    let mut checked = 0usize;
+    for target in ["decode_utvideo", "inspect_utvideo"] {
+        for fx in CORPUS.iter().chain(GRADIENT_CORPUS.iter()) {
+            let path = root.join(target).join(format!("seed_ref_{}", fx.name));
+            if !path.exists() {
+                // Only fixtures whose geometry fits the harness's 64×64
+                // even-dimension cap are seeded (the 256×256 and
+                // odd-height frames cannot be expressed in the header).
+                let fits = fx.width <= 64
+                    && fx.height <= 64
+                    && fx.width % 2 == 0
+                    && fx.height % 2 == 0
+                    && fx.num_slices <= 16;
+                assert!(!fits, "{target}: missing expected seed for {}", fx.name);
+                continue;
+            }
+            let seed = std::fs::read(&path).unwrap();
+            let (header, payload) = seed.split_at(4);
+
+            // Re-run the harness's documented header mapping.
+            let sel_fourcc = match header[0] % 5 {
+                0 => Fourcc::Uly0,
+                1 => Fourcc::Uly2,
+                2 => Fourcc::Uly4,
+                3 => Fourcc::Ulrg,
+                _ => Fourcc::Ulra,
+            };
+            let width = ((header[1] as u32 % 64) + 2) & !1;
+            let height = ((header[2] as u32 % 64) + 2) & !1;
+            let num_slices = (header[3] as usize % 16) + 1;
+            assert_eq!(
+                sel_fourcc,
+                Fourcc::from_bytes(*fx.fourcc).unwrap(),
+                "{target}/{}: seed fourcc selector",
+                fx.name
+            );
+            assert_eq!(width, fx.width, "{target}/{}: seed width", fx.name);
+            assert_eq!(height, fx.height, "{target}/{}: seed height", fx.name);
+            assert_eq!(
+                num_slices, fx.num_slices,
+                "{target}/{}: seed slice count",
+                fx.name
+            );
+
+            // The payload must be the fixture chunk verbatim and decode
+            // to the reference pixels under the mapped config.
+            assert_eq!(payload, fx.chunk, "{target}/{}: seed payload", fx.name);
+            let ed = Extradata::ffmpeg_for(sel_fourcc, num_slices).unwrap();
+            let cfg = StreamConfig::new(sel_fourcc, width, height, ed).unwrap();
+            let decoded = decode_frame(&cfg, payload)
+                .unwrap_or_else(|e| panic!("{target}/{}: seed decode failed: {e}", fx.name));
+            assert_eq!(
+                concat_planes(&decoded.planes),
+                fx.pixels,
+                "{target}/{}: seed pixels",
+                fx.name
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 32, "committed fuzz-seed count drifted");
+}

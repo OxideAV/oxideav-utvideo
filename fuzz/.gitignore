@@ -11,3 +11,15 @@ coverage
 # small hand-picked seed set so a fresh
 # `cargo fuzz run encode_utvideo_frame` doesn't start cold.
 !/corpus/encode_utvideo_frame/
+# Round 382: whitelist the curated reference-stream seeds for the decode
+# and inspect targets (real wire frame bodies prefixed with the 4-byte
+# fuzz header). libFuzzer's self-grown sha1-named corpus stays ignored;
+# only the `seed_ref_*` files are tracked — genuine Kraft-valid
+# descriptors + dense Huffman payloads the mutator cannot synthesise
+# cheaply from cold.
+!/corpus/decode_utvideo/
+/corpus/decode_utvideo/*
+!/corpus/decode_utvideo/seed_ref_*
+!/corpus/inspect_utvideo/
+/corpus/inspect_utvideo/*
+!/corpus/inspect_utvideo/seed_ref_*
