@@ -343,6 +343,30 @@ fn inspector_layout_agrees_with_reference_decode() {
     }
 }
 
+/// Cross-check the crate's [`Extradata::ffmpeg_for`] builder against the
+/// *actual wire extradata* of every reference stream: for each fixture,
+/// the 16 bytes our builder produces for `(fourcc, num_slices)` must be
+/// byte-identical to the extradata the reference encoder wrote
+/// (`spec/01` §2 layout; §2.1 encoder-version constant; §2.2
+/// source-format tags including the non-FOURCC ULRG/ULRA encodings
+/// `00 00 01 18` / `00 00 02 18`; §2.3 frame-info size 4; §2.4 flags =
+/// Huffman bit + slice top byte). Until now the builder was pinned only
+/// against spec prose; this pins it against captured wire bytes across
+/// all five FourCCs and slice counts 1/2/3/4/8.
+#[test]
+fn extradata_builder_matches_reference_wire_bytes() {
+    for fx in CORPUS {
+        let fourcc = Fourcc::from_bytes(*fx.fourcc).unwrap();
+        let built = Extradata::ffmpeg_for(fourcc, fx.num_slices).unwrap();
+        assert_eq!(
+            &built.to_bytes()[..],
+            fx.extradata,
+            "{}: built extradata differs from reference wire bytes",
+            fx.name
+        );
+    }
+}
+
 /// The `uly4_none_solid_s1` fixture is a constant-per-plane input under
 /// the identity predictor, so every plane collapses to the single-symbol
 /// fast path (`spec/05` §6.1): a lone `code_length = 0` sentinel and

@@ -7,8 +7,13 @@ Clean-room implementation against the spec under
 
 ## Status
 
-Decode and encode are both functional at roughly **97%** coverage of
-the classic 8-bit FourCC family. The crate is codec-only: AVI / VfW
+Decode and encode are both functional at roughly **98%** coverage of
+the classic 8-bit FourCC family, validated against a committed
+reference-stream golden corpus: real frame bodies decode byte-exact,
+and this crate's own streams — including gradient (mode 2) and
+128-slice partitionings the reference encoder cannot produce — were
+verified accepted by the black-box reference decoder with byte-exact
+pixel reconstruction. The crate is codec-only: AVI / VfW
 container handling (including the FourCC + extradata that identifies a
 Ut Video stream on the wire) lives in `oxideav-avi`. Callers hand in a
 parsed `StreamConfig` + frame bytes; the codec returns per-plane
@@ -76,7 +81,12 @@ predictor.
 ## Testing
 
 The crate ships per-stage unit tests, a self-roundtrip matrix across
-every FourCC × predictor × slice-count combination, a malformed-payload
+every FourCC × predictor × slice-count combination, a
+**reference-stream golden corpus** (`tests/fixtures/reference/`: 19
+pre-extracted frame bodies + wire extradata + reference-decoder pixel
+ground-truth, decoded byte-exact and cross-checked through the strict,
+serial, parallel, and inspector surfaces, with the extradata builder
+pinned to captured wire bytes), a malformed-payload
 rejection suite, criterion benchmarks (`benches/`), and four
 `cargo-fuzz` targets (`decode_utvideo`, `encode_utvideo_frame`,
 `inspect_utvideo`, `huffman_codec`) that exercise the decode, encode,

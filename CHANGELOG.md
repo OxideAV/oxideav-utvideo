@@ -34,12 +34,60 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cross-surface reference conformance.** All reference fixtures are
+  additionally driven through `decode_frame_strict` (a spec-conformant
+  encoder zero-pads each slice to its word boundary per `spec/05` §4.3,
+  so strict decode must accept every real stream and equal the lenient
+  output), through the forced serial and parallel decode paths (both
+  must reproduce the reference pixels, including genuinely multi-slice
+  frames), and through the decode-free `peek_frame` inspector (plane
+  geometry, `spec/02` §5.2 row partitioning, frame-info/predictor, and
+  descriptor primitives cross-validated against a full decode of the
+  same stream). The constant ULY4 fixture pins the single-symbol fast
+  path (`spec/05` §6.1) on a real stream.
+- **Encoder round-trip on reference-authentic pixels.** Each
+  reference-decoded pixel buffer is split back into on-wire planes,
+  re-encoded with the fixture's own predictor + slice count, and decoded
+  again — guarding the fixed modular-median formula on the encode side
+  and the RGB decorrelation transform (`spec/04` §6) against
+  ground-truth content rather than synthetic inputs.
+- **Auto-parallel and 4:2:2 odd-height reference fixtures.**
+  `uly0_median_grad_s8_256` (256×256, 8 slices) crosses the decoder's
+  64 Ki-pixel auto-parallel threshold so the default `decode_frame`
+  dispatches the multi-threaded path on a real stream;
+  `uly2_left_oddh_s3` (32×33) exercises `spec/02` §3.1's width-only
+  chroma subsampling with an odd frame height.
+- **Gradient (mode 2) interop fixtures.** The reference encoder rejects
+  gradient prediction (`spec/04` §7.3), so mode 2 cannot appear in a
+  reference-encoder corpus — but the reference decoder accepts
+  spec-compliant gradient streams. Two fixtures produced by this crate's
+  encoder in gradient mode (ULY4, 1 and 4 slices) were confirmed offline
+  to be accepted by the black-box reference decoder with byte-exact
+  pixel reconstruction, proving this crate's gradient encoder output is
+  wire-compatible: the gradient interior `P = (left + top − top_left)
+  mod 256`, the `P = top` column-0 edge, and the per-slice `+128` seed
+  (`spec/04` §7.1) are all reference-cross-checked.
+- **128-slice one-row-per-chroma-slice interop fixture.** The reference
+  encoder caps its slice count at the subsampling-applied plane height
+  (observed rejection at 256 slices on 256×256 ULY0) and its defaults
+  never exceed 8 here, so the finest legal partitioning — 128 slices
+  giving each 128-row chroma plane exactly one row per slice — can only
+  come from a third-party encoder. `uly0_left_grad_s128` (this crate's
+  encoder, reference-decoder-verified offline) pins that degenerate
+  slice shape end to end, including via the inspector's row accessors
+  and the strict / serial / parallel decode paths.
+- **Extradata builder pinned to captured wire bytes.**
+  `Extradata::ffmpeg_for(fourcc, num_slices).to_bytes()` must equal the
+  actual 16-byte extradata of every reference stream — all five
+  FourCCs' `spec/01` §2.2 source-format tags (including the non-FOURCC
+  ULRG/ULRA `00 00 01 18` / `00 00 02 18` encodings) and §2.4 flag
+  layouts are now validated against real captures, not just spec prose.
 - **Reference-stream golden decode conformance corpus.** Until now
   every test was a *self*-round-trip (encode with the in-crate encoder,
   decode with the in-crate decoder) — which proves the two are mutually
   inverse but cannot catch a bug that is symmetric across our own
   encode/decode (as the median clip bug above demonstrated).
-  `tests/round382_reference_decode.rs` adds 14 pre-extracted reference
+  `tests/round382_reference_decode.rs` adds 16 pre-extracted reference
   Ut Video frame bodies (`00dc` chunk payloads, `spec/02` §1) with their
   16-byte wire extradata (`spec/01` §2) and reference-decoder pixel
   ground-truth, committed as static bytes under
@@ -47,11 +95,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   binary at build or CI time (fixtures produced offline by a black-box
   validator invoked purely as an opaque I/O oracle). Coverage spans all
   five FourCCs (`ULY0`/`ULY2`/`ULY4`/`ULRG`/`ULRA`), the three
-  reference-encoder-supported predictors (none / left / median), single-
-  and multi-slice frames (1/2/4), and low-entropy / ramp / high-entropy
-  content exercising the single-symbol fast path (`spec/05` §6.1), the
-  dense Huffman LUT, and the long-code tier-scan fallback (`spec/05`
-  §7). Each frame's decoded planes must equal the reference pixel bytes
+  reference-encoder-supported predictors (none / left / median), slice
+  counts 1/2/3/4/8, and low-entropy / ramp / high-entropy content
+  exercising the single-symbol fast path (`spec/05` §6.1), the dense
+  Huffman LUT, and the long-code tier-scan fallback (`spec/05` §7).
+  Each frame's decoded planes must equal the reference pixel bytes
   byte-for-byte.
 
 ### Fixed (earlier)
