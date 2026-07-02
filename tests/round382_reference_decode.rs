@@ -510,3 +510,58 @@ fn gradient_mode2_streams_decode_byte_exact() {
         );
     }
 }
+
+/// 128-slice interop fixture — the finest legal slice partitioning for a
+/// 256×256 ULY0 frame: the reference encoder caps its slice count at the
+/// subsampling-applied plane height (observed encoder rejection at 256
+/// slices: "Slice count 256 is larger than the subsampling-applied
+/// height 128"), so 128 slices gives the 128-row chroma planes exactly
+/// **one row per slice** — every chroma slice consists of a lone
+/// Left-predictor row seeded at +128 with no inter-row wrap at all
+/// (`spec/04` §4).
+///
+/// Like the gradient corpus, this chunk was produced by *this crate's*
+/// encoder (the reference encoder's own default never goes past 8 slices
+/// on this frame size) and confirmed offline to be accepted by the
+/// black-box reference decoder with byte-exact pixel reconstruction, so
+/// `reference_decoder(chunk) == pixels` holds for the committed bytes.
+/// The pixel ground-truth is shared with `uly0_median_grad_s8_256` (same
+/// deterministic gradient input), so only the chunk + extradata are
+/// committed for this fixture.
+#[test]
+fn slice_count_128_interop_stream_decodes_byte_exact() {
+    let fx = Fixture {
+        name: "uly0_left_grad_s128",
+        fourcc: b"ULY0",
+        width: 256,
+        height: 256,
+        num_slices: 128,
+        pred: Predictor::Left,
+        extradata: include_bytes!("fixtures/reference/uly0_left_grad_s128.extradata"),
+        chunk: include_bytes!("fixtures/reference/uly0_left_grad_s128.chunk"),
+        pixels: include_bytes!("fixtures/reference/uly0_median_grad_s8_256.pixels"),
+    };
+    let cfg = config_for(&fx);
+    let decoded = decode_frame(&cfg, fx.chunk).unwrap();
+    assert_eq!(decoded.predictor, Predictor::Left);
+    assert_eq!(
+        concat_planes(&decoded.planes),
+        fx.pixels,
+        "128-slice decode diverged from reference pixels"
+    );
+    // Chroma planes must partition into exactly one row per slice.
+    let layout = peek_frame(&cfg, fx.chunk).unwrap();
+    for pl in &layout.planes[1..] {
+        assert_eq!(pl.height, 128, "chroma plane height");
+        for s in &pl.slices {
+            assert_eq!(s.row_count(), 1, "one row per chroma slice");
+        }
+    }
+    // Strict + serial/parallel equivalence.
+    assert_eq!(decode_frame_strict(&cfg, fx.chunk).unwrap(), decoded);
+    assert_eq!(
+        decode_frame_parallel(&cfg, fx.chunk).unwrap(),
+        decode_frame_serial(&cfg, fx.chunk).unwrap(),
+        "128-slice serial vs parallel"
+    );
+}
