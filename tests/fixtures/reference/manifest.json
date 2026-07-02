@@ -152,5 +152,27 @@
   "extradata": "f0000001000002180400000001000000",
   "chunk_len": 3092,
   "pixels_len": 4096
+ },
+ {
+  "name": "uly0_median_grad_s8_256",
+  "fourcc": "ULY0",
+  "w": 256,
+  "h": 256,
+  "pred": "median",
+  "slices": 8,
+  "extradata": "f0000001595631320400000001000007",
+  "chunk_len": 14180,
+  "pixels_len": 98304
+ },
+ {
+  "name": "uly2_left_oddh_s3",
+  "fourcc": "ULY2",
+  "w": 32,
+  "h": 33,
+  "pred": "left",
+  "slices": 3,
+  "extradata": "f0000001595559320400000001000002",
+  "chunk_len": 1096,
+  "pixels_len": 2112
  }
 ]

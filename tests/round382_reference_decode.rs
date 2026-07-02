@@ -85,6 +85,14 @@ const CORPUS: &[Fixture] = fixtures![
     ("ulrg_median_grad_s1", b"ULRG", 32, 32, 1, Median),
     ("ulra_left_grad_s1", b"ULRA", 32, 32, 1, Left),
     ("ulra_none_grad_s1", b"ULRA", 32, 32, 1, None),
+    // Crosses the decoder's 64 Ki-pixel auto-parallel threshold with 8
+    // slices, so the default `decode_frame` entry dispatches the
+    // multi-threaded path on a *real* stream (median-at-scale).
+    ("uly0_median_grad_s8_256", b"ULY0", 256, 256, 8, Median),
+    // Odd frame height on a 4:2:2 FourCC: `spec/02` §3.1 subsamples the
+    // U/V width but NOT the height, so plane heights are 33/33/33 while
+    // widths are 32/16/16 (`spec/02` §3.2 lets ULY2 accept odd height).
+    ("uly2_left_oddh_s3", b"ULY2", 32, 33, 3, Left),
 ];
 
 /// Build a [`StreamConfig`] from a fixture's committed wire extradata.
@@ -134,7 +142,7 @@ fn planes_from_pixels(fx: &Fixture) -> Vec<PlaneInput> {
 
 #[test]
 fn every_reference_frame_decodes_byte_exact() {
-    assert_eq!(CORPUS.len(), 14, "fixture corpus size drifted");
+    assert_eq!(CORPUS.len(), 16, "fixture corpus size drifted");
     for fx in CORPUS {
         let cfg = config_for(fx);
         let decoded = decode_frame(&cfg, fx.chunk)
@@ -403,4 +411,35 @@ fn encoder_round_trips_reference_pixels() {
             fx.name
         );
     }
+}
+
+/// The `uly0_median_grad_s8_256` fixture is 256×256 = 65 536 luma pixels
+/// with 8 slices, so it meets the decoder's documented 64 Ki-pixel
+/// auto-parallel threshold — the default [`decode_frame`] entry point
+/// dispatches the multi-threaded per-slice path (`decoder` module docs,
+/// `spec/02` §7). This pins that the auto-dispatch parallel path decodes
+/// a real reference stream byte-exact (the smaller fixtures all stay on
+/// the serial side of the threshold), and that it agrees with the forced
+/// serial path on the same bytes.
+#[test]
+fn large_reference_frame_exercises_auto_parallel_path() {
+    let fx = CORPUS
+        .iter()
+        .find(|f| f.name == "uly0_median_grad_s8_256")
+        .unwrap();
+    // Guard the premise: the frame must actually cross the threshold, or
+    // this test silently stops covering the parallel auto-dispatch.
+    assert!(
+        (fx.width as usize) * (fx.height as usize) >= 64 * 1024 && fx.num_slices > 1,
+        "large fixture no longer crosses the auto-parallel threshold"
+    );
+    let cfg = config_for(fx);
+    let auto = decode_frame(&cfg, fx.chunk).unwrap();
+    let serial = decode_frame_serial(&cfg, fx.chunk).unwrap();
+    assert_eq!(auto, serial, "auto-parallel path diverged from serial");
+    assert_eq!(
+        concat_planes(&auto.planes),
+        fx.pixels,
+        "auto-parallel decode lost reference pixels"
+    );
 }
