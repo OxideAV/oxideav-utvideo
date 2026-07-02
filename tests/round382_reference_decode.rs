@@ -443,3 +443,70 @@ fn large_reference_frame_exercises_auto_parallel_path() {
         "auto-parallel decode lost reference pixels"
     );
 }
+
+// ---------------------------------------------------------------------
+// Gradient (predictor mode 2) interop corpus.
+//
+// The reference *encoder* rejects `-pred gradient` ("Gradient prediction
+// is not supported.", `spec/04` §7.3), so mode 2 cannot appear in the
+// reference-encoder-produced corpus above — yet the reference *decoder*
+// accepts gradient streams a spec-compliant encoder emits (`spec/04`
+// §7.3, `spec/05` §10, where the mode-2 wire format was itself pinned by
+// feeding hand-crafted gradient bitstreams to the reference decoder).
+//
+// These two fixtures are produced by *this crate's* encoder in gradient
+// mode (`frame_info & 0x300 == 0x200`) and were confirmed offline to be
+// accepted by the black-box reference decoder, which reconstructs
+// exactly the committed `.pixels` (invoked purely as an opaque I/O
+// oracle — no third-party codec source read). So the committed
+// invariant is identical to the corpus above — `reference_decoder(chunk)
+// == pixels` — and additionally proves this crate's gradient *encoder*
+// output is wire-compatible with the reference decoder. The pure-Rust
+// test below re-establishes `our_decoder(chunk) == pixels`.
+//
+// Coverage the reference-encoder corpus cannot reach:
+// - the gradient interior `P = (left + top - top_left) mod 256`
+//   (`spec/04` §7.1),
+// - the gradient column-0 edge `P = top` (NOT the median/left
+//   continuous-wrap — `spec/04` §7.1), exercised for `r > r_start`,
+// - the per-slice `+128` seed under gradient (the `_s4` fixture's four
+//   slices each re-seed at their top row).
+const GRADIENT_CORPUS: &[Fixture] = fixtures![
+    ("gradient_uly4_mode2_s1", b"ULY4", 32, 32, 1, Gradient),
+    ("gradient_uly4_mode2_s4", b"ULY4", 32, 32, 4, Gradient),
+];
+
+#[test]
+fn gradient_mode2_streams_decode_byte_exact() {
+    for fx in GRADIENT_CORPUS {
+        let cfg = config_for(fx);
+        let decoded = decode_frame(&cfg, fx.chunk)
+            .unwrap_or_else(|e| panic!("{}: gradient decode failed: {e}", fx.name));
+        assert_eq!(
+            decoded.predictor,
+            Predictor::Gradient,
+            "{}: frame_info must select mode 2 (0x200)",
+            fx.name
+        );
+        assert_eq!(
+            concat_planes(&decoded.planes),
+            fx.pixels,
+            "{}: gradient decode diverged from reference pixels",
+            fx.name
+        );
+
+        // Strict + serial/parallel equivalence hold for gradient too.
+        assert_eq!(
+            decode_frame_strict(&cfg, fx.chunk).unwrap(),
+            decoded,
+            "{}: strict gradient decode",
+            fx.name
+        );
+        assert_eq!(
+            decode_frame_parallel(&cfg, fx.chunk).unwrap(),
+            decode_frame_serial(&cfg, fx.chunk).unwrap(),
+            "{}: gradient serial vs parallel",
+            fx.name
+        );
+    }
+}
