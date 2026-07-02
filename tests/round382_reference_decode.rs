@@ -36,8 +36,8 @@
 
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
 use oxideav_utvideo::{
-    decode_frame, decode_frame_strict, peek_frame, peek_frame_info, Extradata, Fourcc, Predictor,
-    StreamConfig,
+    decode_frame, decode_frame_strict, encode_frame, peek_frame, peek_frame_info, EncodedFrame,
+    Extradata, Fourcc, PlaneInput, Predictor, StreamConfig,
 };
 
 struct Fixture {
@@ -111,6 +111,24 @@ fn concat_planes(planes: &[oxideav_utvideo::DecodedPlane]) -> Vec<u8> {
     for p in planes {
         out.extend_from_slice(&p.samples);
     }
+    out
+}
+
+/// Split a flat reference pixel buffer into per-plane [`PlaneInput`]s in
+/// on-wire order using the FourCC's plane geometry (`spec/02` §3.1).
+fn planes_from_pixels(fx: &Fixture) -> Vec<PlaneInput> {
+    let fourcc = Fourcc::from_bytes(*fx.fourcc).unwrap();
+    let mut out = Vec::with_capacity(fourcc.plane_count());
+    let mut off = 0usize;
+    for i in 0..fourcc.plane_count() {
+        let (pw, ph) = fourcc.plane_dim(i, fx.width, fx.height);
+        let n = pw as usize * ph as usize;
+        out.push(PlaneInput {
+            samples: fx.pixels[off..off + n].to_vec(),
+        });
+        off += n;
+    }
+    assert_eq!(off, fx.pixels.len(), "{}: plane split residue", fx.name);
     out
 }
 
@@ -340,6 +358,49 @@ fn solid_reference_frame_is_all_single_symbol() {
             pl.slices[0].len(),
             0,
             "single-symbol plane carries no slice data"
+        );
+    }
+}
+
+/// Encoder round-trip on **reference-authentic** pixels: feed the
+/// reference-decoded pixel planes back through the in-crate encoder
+/// (using the fixture's own predictor and slice count) and decode again.
+///
+/// Unlike the crate's pre-existing self-round-trips over *synthetic*
+/// inputs, the pixels here are the ground-truth output of a real
+/// reference stream — including the median-with-gradient-wrap content
+/// (`uly0_median_grad_s1`, `uly2_median_grad_s2`, `ulrg_median_grad_s1`,
+/// `uly4_median_noise_s4`) that exposed the mode-3 clip bug. This guards
+/// the fixed modular-median formula on the **encode** side too (a
+/// wrong forward-median would produce residuals the fixed inverse-median
+/// could not invert back to the reference pixels), across all five
+/// FourCCs and the RGB decorrelation transform (`spec/04` §6).
+#[test]
+fn encoder_round_trips_reference_pixels() {
+    for fx in CORPUS {
+        let cfg = config_for(fx);
+        let frame = EncodedFrame {
+            fourcc: cfg.fourcc,
+            width: fx.width,
+            height: fx.height,
+            predictor: fx.pred,
+            num_slices: fx.num_slices,
+            planes: planes_from_pixels(fx),
+        };
+        let encoded =
+            encode_frame(&frame).unwrap_or_else(|e| panic!("{}: re-encode failed: {e}", fx.name));
+        let decoded = decode_frame(&cfg, &encoded)
+            .unwrap_or_else(|e| panic!("{}: re-decode failed: {e}", fx.name));
+        assert_eq!(
+            decoded.predictor, fx.pred,
+            "{}: re-encoded predictor",
+            fx.name
+        );
+        assert_eq!(
+            concat_planes(&decoded.planes),
+            fx.pixels,
+            "{}: encoder round-trip lost reference pixels",
+            fx.name
         );
     }
 }
