@@ -144,11 +144,37 @@ fn total_pixels_matches_plane_area() {
 /// 0 even though the slice extent exists.
 #[test]
 fn slice_count_above_plane_height_collapses_trailing_rows_to_zero() {
+    // The in-crate encoder refuses `num_slices > plane height` since
+    // round 382 (`Error::SliceCountExceedsPlaneHeight` — conformant
+    // decoders reject zero-length slices in multi-symbol planes), so
+    // the wire bytes are hand-crafted: 16×3 ULY4, 4 slices, each plane
+    // a constant-zero surface under Left. Per plane: two-symbol
+    // descriptor (`{0: 1, 128: 1}` → codes `128 → "0"`, `0 → "1"` per
+    // spec/05 §2.2/§6.2), offsets `[0, 4, 8, 12]`, and three 4-byte
+    // slice words (each populated slice = one 16-pixel row: first-pixel
+    // residual 128 then fifteen zeros → bits `0` + `1`×15 → word
+    // `0x7FFF_0000`). The decode-free inspector must stay lenient and
+    // surface slice 0 as a zero-row, zero-length record.
     let fc = Fourcc::Uly4;
     let (w, h) = (16u32, 3u32);
     let s = 4usize;
     let cfg = cfg_for(fc, w, h, s);
-    let bytes = xorshift_frame(fc, w, h, s, Predictor::Left);
+    let mut plane = Vec::with_capacity(256 + 16 + 12);
+    let mut desc = [255u8; 256];
+    desc[0] = 1;
+    desc[128] = 1;
+    plane.extend_from_slice(&desc);
+    for off in [0u32, 4, 8, 12] {
+        plane.extend_from_slice(&off.to_le_bytes());
+    }
+    for _ in 0..3 {
+        plane.extend_from_slice(&0x7FFF_0000u32.to_le_bytes());
+    }
+    let mut bytes = Vec::with_capacity(3 * plane.len() + 4);
+    for _ in 0..3 {
+        bytes.extend_from_slice(&plane);
+    }
+    bytes.extend_from_slice(&0x0000_0100u32.to_le_bytes()); // pred left
     let layout = peek_frame(&cfg, &bytes).unwrap();
     for p in &layout.planes {
         let rows: Vec<u32> = p.slices.iter().map(|sl| sl.row_count()).collect();

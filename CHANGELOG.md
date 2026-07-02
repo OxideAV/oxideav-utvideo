@@ -32,6 +32,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   median paths pick it up. A `predict::median_uses_modular_gradient_not_clip`
   unit test pins three wrap cases plus a no-wrap agreement case.
 
+### Changed
+
+- **Encoder rejects slice counts that would force zero-length slices.**
+  Black-box interop probing established that a conformant decoder
+  refuses a multi-symbol plane carrying a zero-length slice, and that
+  the reference encoder caps its slice count at the subsampling-applied
+  plane height for exactly this reason — so a stream encoded with
+  `num_slices` greater than the smallest plane's row count is readable
+  only by this crate. `encode_frame` now returns the new
+  `Error::SliceCountExceedsPlaneHeight { num_slices, min_plane_height }`
+  (category `ApiMisuse`) instead of emitting the degenerate shape. The
+  `spec/02` §5.2 row formula permits zero-row slices arithmetically;
+  the interop evidence is what forbids emitting them. The **decoder and
+  inspector stay lenient** and continue to accept zero-pixel slices
+  (pinned by a new hand-crafted-stream test each in `round7` /
+  `round21` / `round241`, since the in-crate encoder can no longer
+  produce such bytes). The `round7` 1..=256 slice sweeps now assert
+  rejection past each FourCC's minimum plane height and keep the
+  round-trip + byte-stability assertions below it.
+
 ### Added
 
 - **Cross-surface reference conformance.** All reference fixtures are

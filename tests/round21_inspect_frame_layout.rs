@@ -241,13 +241,37 @@ fn per_slice_bytes_match_decode_frame_slice_data_subranges() {
 
 #[test]
 fn slices_collapse_to_zero_when_num_slices_exceeds_height() {
-    // 4×4 plane with 8 slices: floor(ph*(s+1)/N) - floor(ph*s/N) is 0
-    // for some s; those slices have empty slice-data bytes (spec/02 §5.1).
+    // 2×2 plane with 3 slices: floor(ph*(s+1)/N) - floor(ph*s/N) is 0
+    // for slice 0; that slice has empty slice-data bytes (spec/02 §5.1).
+    // The in-crate encoder refuses to emit this shape since round 382
+    // (conformant decoders reject zero-length slices in multi-symbol
+    // planes; `Error::SliceCountExceedsPlaneHeight`), so the wire bytes
+    // are hand-crafted here: per plane a two-symbol descriptor
+    // (`{0: 1, 128: 1}` → codes `128 → "0"`, `0 → "1"` per spec/05
+    // §2.2/§6.2), offsets `[0, 4, 8]`, and two 4-byte slice words. The
+    // decode-free inspector must stay lenient and surface the empty
+    // slice as a zero-length byte range.
     let fc = Fourcc::Uly4;
-    let (w, h) = (4, 4);
-    let slices = 8;
+    let (w, h) = (2, 2);
+    let slices = 3;
     let cfg = cfg_for(fc, w, h, slices);
-    let bytes = build_encoded_frame(fc, w, h, slices, Predictor::Left);
+
+    let mut plane = Vec::with_capacity(276);
+    let mut desc = [255u8; 256];
+    desc[0] = 1;
+    desc[128] = 1;
+    plane.extend_from_slice(&desc);
+    for off in [0u32, 4, 8] {
+        plane.extend_from_slice(&off.to_le_bytes());
+    }
+    plane.extend_from_slice(&0x4000_0000u32.to_le_bytes()); // [128, 0] → "01"
+    plane.extend_from_slice(&0xC000_0000u32.to_le_bytes()); // [0, 0] → "11"
+    let mut bytes = Vec::with_capacity(3 * plane.len() + 4);
+    for _ in 0..3 {
+        bytes.extend_from_slice(&plane);
+    }
+    bytes.extend_from_slice(&0x0000_0100u32.to_le_bytes()); // pred left
+
     let layout = peek_frame(&cfg, &bytes).unwrap();
     let mut saw_empty_slice = false;
     for p in &layout.planes {
@@ -256,6 +280,8 @@ fn slices_collapse_to_zero_when_num_slices_exceeds_height() {
             if s.is_empty() {
                 saw_empty_slice = true;
                 assert_eq!(s.start, s.end);
+                assert_eq!(s.row_count(), 0);
+                assert_eq!(s.pixel_count, 0);
             }
         }
     }

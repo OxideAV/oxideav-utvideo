@@ -75,6 +75,10 @@ fn every_variant() -> Vec<Error> {
         Error::HuffmanBitClear,
         Error::InterlacedNotSupported,
         Error::InvalidSliceCount,
+        Error::SliceCountExceedsPlaneHeight {
+            num_slices: 9,
+            min_plane_height: 8,
+        },
         Error::ChunkTooShort {
             offset: 256,
             needed: 16,
@@ -291,6 +295,10 @@ fn category_malformed_stream_variants() {
 fn category_api_misuse_variants() {
     let misuse: &[Error] = &[
         Error::InvalidSliceCount,
+        Error::SliceCountExceedsPlaneHeight {
+            num_slices: 9,
+            min_plane_height: 8,
+        },
         Error::EncoderPlaneSizeMismatch {
             plane: 0,
             expected: 0,
@@ -383,10 +391,10 @@ fn category_count_matches_variant_count() {
     // overall fixture count. A drift trips the round-13 partition
     // invariant.
     let total = every_variant().len();
-    // 9 malformed + 3 api-misuse + 3 unsupported + 4 stream-shape = 19.
+    // 9 malformed + 4 api-misuse + 3 unsupported + 4 stream-shape = 20.
     assert_eq!(
-        total, 19,
-        "every_variant() length drifted from expected 19 — update round13_error_taxonomy.rs"
+        total, 20,
+        "every_variant() length drifted from expected 20 — update round13_error_taxonomy.rs"
     );
 }
 

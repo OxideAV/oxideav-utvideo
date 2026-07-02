@@ -298,14 +298,40 @@ fn encode_decode_reencode_is_byte_stable_fixed_point() {
 
 /// Sweep `num_slices` across the *full* documented `1..=256` range for
 /// one FOURCC at a height chosen so most slice counts do NOT evenly
-/// divide it, and the tail (`N > ph`) forces zero-row slices. Each cell
-/// round-trips and (for `N <= 64`, where re-encode is cheap enough)
-/// also checks the byte-stable fixed point.
+/// divide it. Cells with `N <= min_plane_height` round-trip and (for
+/// `N <= 64`, where re-encode is cheap enough) also check the
+/// byte-stable fixed point; cells past the smallest plane's row count
+/// must be **rejected** by the encoder with
+/// `Error::SliceCountExceedsPlaneHeight` — such counts would force
+/// zero-length slices in multi-symbol planes, which conformant decoders
+/// refuse as malformed (round 382 black-box observation; the reference
+/// encoder caps its slice count at the subsampling-applied plane height
+/// for the same reason).
 fn slice_sweep_for(fc: Fourcc, w: u32, h: u32, pred: Predictor) {
+    let min_plane_height = (0..fc.plane_count())
+        .map(|i| fc.plane_dim(i, w, h).1 as usize)
+        .min()
+        .unwrap();
     for slices in 1usize..=256 {
         let frame = random_frame(fc, w, h, slices, pred, 0xA5A5_1234 ^ slices as u64, 0x1f);
-        let cfg = stream_config(fc, w, h, slices);
 
+        if slices > min_plane_height {
+            match encode_frame(&frame) {
+                Err(oxideav_utvideo::Error::SliceCountExceedsPlaneHeight {
+                    num_slices,
+                    min_plane_height: got_h,
+                }) => {
+                    assert_eq!(num_slices, slices);
+                    assert_eq!(got_h, min_plane_height);
+                }
+                other => panic!(
+                    "{fc:?}/{pred:?}/s={slices}: expected SliceCountExceedsPlaneHeight, got {other:?}"
+                ),
+            }
+            continue;
+        }
+
+        let cfg = stream_config(fc, w, h, slices);
         let bytes1 = encode_frame(&frame).expect("encode in sweep");
         let decoded = decode_frame(&cfg, &bytes1).expect("decode in sweep");
         assert_pixel_roundtrip(
@@ -317,7 +343,7 @@ fn slice_sweep_for(fc: Fourcc, w: u32, h: u32, pred: Predictor) {
         // The slice-end-offset table must list exactly `num_slices`
         // entries per plane (spec/02 §5). Byte-stability re-encode for
         // the lower half keeps this test's cost bounded while still
-        // covering the uneven-split (N ∤ h) and zero-row (N > h) cases.
+        // covering the uneven-split (N ∤ h) cases.
         if slices <= 64 {
             let frame2 = frame_from_decoded(&decoded, slices);
             let bytes2 = encode_frame(&frame2).expect("re-encode in sweep");
@@ -332,17 +358,17 @@ fn slice_sweep_for(fc: Fourcc, w: u32, h: u32, pred: Predictor) {
 #[test]
 fn slice_count_sweep_1_to_256_uly0_non_divisible_height() {
     // ULY0 needs even W and H. h = 70 → for N ∈ {3,4,8,16,...} the
-    // luma split is uneven; chroma height = 35 → N > 35 forces zero-row
-    // chroma slices well before N hits 256. W = 64, H = 70.
+    // luma split is uneven; chroma height = 35 → N > 35 is rejected by
+    // the encoder well before N hits 256. W = 64, H = 70.
     slice_sweep_for(Fourcc::Uly0, 64, 70, Predictor::Median);
 }
 
 #[test]
-fn slice_count_sweep_1_to_256_uly2_zero_row_tail() {
-    // ULY2 needs only even W. h = 50 → for N > 50 every luma slice past
-    // the 50th carries zero rows (empty residual stream, zero
-    // slice-data bytes per spec/02 §5.1). Stresses the zero-row path
-    // hard across N ∈ 51..=256. W = 62, H = 50.
+fn slice_count_sweep_1_to_256_uly2_rejected_tail() {
+    // ULY2 needs only even W. h = 50 → every N ∈ 51..=256 exceeds the
+    // plane height and must be rejected by the encoder (zero-row slices
+    // would carry zero slice-data bytes, which conformant decoders
+    // refuse for multi-symbol planes). W = 62, H = 50.
     slice_sweep_for(Fourcc::Uly2, 62, 50, Predictor::Gradient);
 }
 
@@ -376,6 +402,22 @@ fn slice_count_at_and_past_one_row_per_slice() {
     for &slices in &[h as usize - 1, h as usize, h as usize + 1, h as usize + 7] {
         for pred in all_predictors() {
             let frame = random_frame(fc, w, h, slices, pred, 0x1357 ^ slices as u64, 0xff);
+
+            if slices > h as usize {
+                // Past one-row-per-slice the encoder must refuse: a
+                // zero-row slice would carry zero slice-data bytes,
+                // which conformant decoders reject for multi-symbol
+                // planes (round 382 interop pin).
+                assert!(
+                    matches!(
+                        encode_frame(&frame),
+                        Err(oxideav_utvideo::Error::SliceCountExceedsPlaneHeight { .. })
+                    ),
+                    "{fc:?}/{pred:?}/s={slices}: expected rejection past one-row-per-slice"
+                );
+                continue;
+            }
+
             let cfg = stream_config(fc, w, h, slices);
             let bytes = encode_frame(&frame).expect("encode edge");
             let decoded = decode_frame(&cfg, &bytes).expect("decode edge");
@@ -392,5 +434,43 @@ fn slice_count_at_and_past_one_row_per_slice() {
                 "{fc:?}/{pred:?}/s={slices}: one-row edge not byte-stable"
             );
         }
+    }
+}
+
+/// Decoder leniency pin: the in-crate decoder continues to accept a
+/// stream whose slice count exceeds a plane's row count (zero-pixel
+/// slices with zero-length byte ranges). Our encoder refuses to *emit*
+/// such streams (`Error::SliceCountExceedsPlaneHeight`, round 382
+/// interop pin), so this hand-crafts the wire bytes directly: a 2×2
+/// ULY4 frame under predictor None with 3 slices — the `spec/02` §5.2
+/// row formula gives slice 0 zero rows (`floor(2·0/3) == floor(2·1/3)`),
+/// slice 1 row 0, slice 2 row 1. Each plane: two-symbol descriptor
+/// (`{0: 1, 128: 1}` → codes `128 → "0"`, `0 → "1"` per `spec/05` §2.2 /
+/// §6.2), offsets `[0, 4, 8]`, and two 4-byte slice words.
+#[test]
+fn decoder_accepts_zero_row_slices_leniently() {
+    let mut plane = Vec::with_capacity(276);
+    let mut desc = [255u8; 256];
+    desc[0] = 1;
+    desc[128] = 1;
+    plane.extend_from_slice(&desc);
+    for off in [0u32, 4, 8] {
+        plane.extend_from_slice(&off.to_le_bytes());
+    }
+    // Slice 1 residuals [128, 0] → bits "01" → word 0x4000_0000.
+    plane.extend_from_slice(&0x4000_0000u32.to_le_bytes());
+    // Slice 2 residuals [0, 0] → bits "11" → word 0xC000_0000.
+    plane.extend_from_slice(&0xC000_0000u32.to_le_bytes());
+
+    let mut payload = Vec::with_capacity(3 * plane.len() + 4);
+    for _ in 0..3 {
+        payload.extend_from_slice(&plane);
+    }
+    payload.extend_from_slice(&0u32.to_le_bytes()); // frame_info: pred none
+
+    let cfg = stream_config(Fourcc::Uly4, 2, 2, 3);
+    let decoded = decode_frame(&cfg, &payload).expect("lenient zero-row-slice decode");
+    for p in &decoded.planes {
+        assert_eq!(p.samples, vec![128, 0, 0, 0], "plane {:?}", p.label);
     }
 }

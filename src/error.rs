@@ -35,6 +35,23 @@ pub enum Error {
     /// formula always yields >= 1; this guards against caller misuse.
     InvalidSliceCount,
 
+    /// The encoder was asked for more slices than the frame's smallest
+    /// plane has rows, which would force zero-length slices in
+    /// multi-symbol planes. The reference decoder rejects such streams
+    /// outright (black-box observation: a multi-symbol plane carrying a
+    /// zero-length slice is refused as malformed), and the reference
+    /// encoder caps its slice count at the subsampling-applied plane
+    /// height for the same reason — emitting them would produce frames
+    /// only this crate can read. The `spec/02` §5.2 row formula
+    /// `floor((Hp * n) / S)` permits the degenerate shape
+    /// arithmetically; the interop evidence is what forbids it on the
+    /// encode side. The decoder stays lenient and continues to accept
+    /// zero-pixel slices.
+    SliceCountExceedsPlaneHeight {
+        num_slices: usize,
+        min_plane_height: usize,
+    },
+
     /// The `00dc` chunk payload ended before the per-plane structure
     /// (256-byte Huffman descriptor + slice-end offsets table + slice
     /// data) finished parsing. `spec/02` §7.
@@ -141,6 +158,14 @@ impl core::fmt::Display for Error {
             }
             Error::InvalidSliceCount => f.write_str(
                 "oxideav-utvideo: num_slices out of range (must be 1..=256 per spec/01 §4.4.3)",
+            ),
+            Error::SliceCountExceedsPlaneHeight {
+                num_slices,
+                min_plane_height,
+            } => write!(
+                f,
+                "oxideav-utvideo: {num_slices} slices exceed the smallest plane height \
+                 {min_plane_height} (zero-length slices are rejected by conformant decoders)"
             ),
             Error::ChunkTooShort {
                 offset,
@@ -263,7 +288,7 @@ pub enum ErrorCategory {
     MalformedStream,
     /// Caller-side typed contract violation. Examples:
     /// `EncoderPlaneSizeMismatch`, `InvalidSliceCount`,
-    /// `InvalidInput`.
+    /// `SliceCountExceedsPlaneHeight`, `InvalidInput`.
     ApiMisuse,
     /// Structurally valid wire data on a code path this build doesn't
     /// implement. Examples: `HuffmanBitClear` (raw slice mode),
@@ -295,6 +320,7 @@ impl Error {
 
             // Caller-side typed contract violations.
             Error::InvalidSliceCount
+            | Error::SliceCountExceedsPlaneHeight { .. }
             | Error::EncoderPlaneSizeMismatch { .. }
             | Error::InvalidInput(_) => ErrorCategory::ApiMisuse,
 

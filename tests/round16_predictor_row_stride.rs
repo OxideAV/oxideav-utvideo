@@ -134,13 +134,34 @@ fn none_roundtrip_uneven_slice_division() {
 }
 
 #[test]
-fn none_zero_rows_per_slice_allowed() {
-    // `N > ph` produces some zero-row slices (spec/02 §5.1 — zero
-    // slice-data bytes for those slices). The row-strided refactor
-    // must short-circuit when r_end == r_start (no chunks to iterate).
-    let h = 4u32;
+fn none_zero_rows_per_slice_short_circuits() {
+    // `N > ph` produces some zero-row slices from the spec/02 §5.2 row
+    // formula. The encoder now rejects such counts outright on the wire
+    // (round 382 interop pin: conformant decoders refuse zero-length
+    // slices in multi-symbol planes), so the row-strided forward path's
+    // `r_end == r_start` short-circuit is pinned directly at the
+    // predict layer: zero-row slices must yield empty residual streams
+    // while the populated slices tile the plane exactly.
+    let (w, h) = (16usize, 4usize);
     let n = 8usize; // 4 slices have rows, 4 are empty
-    roundtrip(Fourcc::Uly4, 16, h, Predictor::None, n);
+    let plane = xorshift_buf(0xC0FFEE, w * h);
+    let residuals = oxideav_utvideo::predict::forward(Predictor::None, &plane, w, h, n);
+    assert_eq!(residuals.len(), n);
+    let total: usize = residuals.iter().map(|r| r.len()).sum();
+    assert_eq!(total, w * h);
+    for (i, r) in residuals.iter().enumerate() {
+        let rows = (h * (i + 1)) / n - (h * i) / n;
+        assert_eq!(r.len(), rows * w, "slice {i} residual length");
+    }
+    // And the wire-level encoder refuses to emit the degenerate shape.
+    let frame = build_frame(Fourcc::Uly4, w as u32, h as u32, Predictor::None, n);
+    assert!(
+        matches!(
+            encode_frame(&frame),
+            Err(oxideav_utvideo::Error::SliceCountExceedsPlaneHeight { .. })
+        ),
+        "encoder must reject num_slices > plane height"
+    );
 }
 
 // --------------------------------------------------------------------

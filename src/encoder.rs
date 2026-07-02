@@ -142,6 +142,24 @@ fn prepare_planes(frame: &EncodedFrame) -> Result<(Vec<Vec<u8>>, usize)> {
         return Err(Error::InvalidSliceCount);
     }
 
+    // Interop cap: more slices than the smallest plane's row count would
+    // force zero-length slices in multi-symbol planes, which conformant
+    // decoders reject as malformed (black-box observation; the reference
+    // encoder enforces the same cap at the subsampling-applied plane
+    // height). Refuse to emit streams only this crate can read. The
+    // in-crate decoder stays lenient and keeps accepting zero-pixel
+    // slices.
+    let min_plane_height = (0..plane_count)
+        .map(|i| frame.fourcc.plane_dim(i, frame.width, frame.height).1 as usize)
+        .min()
+        .unwrap_or(0);
+    if frame.num_slices > min_plane_height {
+        return Err(Error::SliceCountExceedsPlaneHeight {
+            num_slices: frame.num_slices,
+            min_plane_height,
+        });
+    }
+
     let planes: Vec<Vec<u8>> = frame.planes.iter().map(|p| p.samples.clone()).collect();
     for (i, p) in planes.iter().enumerate() {
         let (pw, ph) = frame.fourcc.plane_dim(i, frame.width, frame.height);
