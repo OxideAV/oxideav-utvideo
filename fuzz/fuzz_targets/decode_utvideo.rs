@@ -25,11 +25,14 @@
 //! geometry (that is a documented capability of the format, not a
 //! decoder bug) — keeping the budget on genuine parser defects: index
 //! math on the descriptor / offset table, slice-range arithmetic, and
-//! the Huffman bit reader. The return value is intentionally discarded;
-//! the only contract under test is that the call *returns*.
+//! the Huffman bit reader. Beyond panic-freedom, the harness asserts the
+//! cross-surface contract: the auto-dispatch, forced-serial, and
+//! forced-parallel decodes agree on success-vs-failure and on the exact
+//! decoded frame, and the strict padding scanner stays panic-free.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_utvideo::{decode_frame, Extradata, Fourcc, StreamConfig};
+use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
+use oxideav_utvideo::{decode_frame, decode_frame_strict, Extradata, Fourcc, StreamConfig};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 {
@@ -70,5 +73,27 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    let _ = decode_frame(&cfg, payload);
+    // Drive all four decode entry points. None may panic, and the three
+    // lenient surfaces (auto-dispatch / forced-serial / forced-parallel)
+    // must agree on success-vs-failure and — on success — on the exact
+    // decoded frame. Every slice's predictor state restarts at the
+    // per-slice +128 seed (`spec/04` §§3.1, 4, 5, 7) and every slice's
+    // Huffman bit-stream is self-contained (`spec/02` §5), so the
+    // fan-out is bit-exact equivalent to the serial walk.
+    let d = decode_frame(&cfg, payload);
+    let s = decode_frame_serial(&cfg, payload);
+    let p = decode_frame_parallel(&cfg, payload);
+    // The strict padding scanner (`spec/05` §4.3) must also stay
+    // panic-free on arbitrary bytes; its accept/reject verdict is
+    // unconstrained here.
+    let _ = decode_frame_strict(&cfg, payload);
+
+    assert_eq!(d.is_ok(), s.is_ok(), "default vs serial ok-mismatch");
+    assert_eq!(d.is_ok(), p.is_ok(), "default vs parallel ok-mismatch");
+    if let (Ok(a), Ok(b)) = (&d, &s) {
+        assert_eq!(a, b, "serial diverged from default");
+    }
+    if let (Ok(a), Ok(b)) = (&d, &p) {
+        assert_eq!(a, b, "parallel diverged from default");
+    }
 });
