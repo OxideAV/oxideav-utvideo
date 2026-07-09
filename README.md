@@ -83,7 +83,11 @@ predictor.
 ## Testing
 
 The crate ships per-stage unit tests, a self-roundtrip matrix across
-every FourCC × predictor × slice-count combination, a
+every FourCC × predictor × slice-count combination, a cross-surface
+decode-agreement harness that asserts the four decode entry points
+(auto-dispatch / forced-serial / forced-parallel / strict) reproduce
+byte-identical frames on every self-encoded stream and never diverge or
+panic on arbitrary bytes, a
 **reference-stream golden corpus** (`tests/fixtures/reference/`: 19
 pre-extracted frame bodies + wire extradata + reference-decoder pixel
 ground-truth, decoded byte-exact and cross-checked through the strict,

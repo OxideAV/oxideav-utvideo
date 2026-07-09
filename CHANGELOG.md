@@ -8,6 +8,22 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Single-symbol plane carrying slice data is now rejected
+  (`spec/05` §6.1).** A single-symbol plane — Huffman descriptor with
+  exactly one `code_length = 0` sentinel, all others `255` — emits its
+  symbol for every pixel and consumes **zero** bits, so `spec/05` §6.1
+  fixes its slice-data byte count at 0 with an all-zero slice-end-offset
+  table. A codelen-0 descriptor paired with a non-empty slice-data
+  segment is self-inconsistent (the descriptor says "no bits", the offset
+  table declares N bytes of them); the decoder previously accepted such a
+  stream and silently discarded the stray bytes. Both the full decoder
+  (`decode_frame`) and the decode-free inspector (`peek_frame`) now
+  reject it with the new
+  `Error::SingleSymbolPlaneHasSliceData { plane, slice_data_len }`
+  (category `MalformedStream`), staying in lockstep. The in-crate encoder
+  already emits an empty blob for single-symbol planes, so this only ever
+  fires on hand-crafted / corrupt input.
+
 - **Median predictor (mode 3) now matches the reference on gradient
   wrap-around.** `spec/04` §5.0 pins the Ut Video median as
   `P = median(A, B, (A + B - C) mod 256)` — a median of three bytes
@@ -54,6 +70,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cross-surface decode-agreement harness + four-path decode fuzzing.**
+  The crate exposes four decode entry points over the same wire bytes:
+  `decode_frame` (auto serial/parallel by pixel count),
+  `decode_frame_serial`, `decode_frame_parallel`, and
+  `decode_frame_strict` (serial + `spec/05` §4.3 trailing-padding scan).
+  The `decode_utvideo` fuzz target now drives **all four** and asserts the
+  cross-surface contract — auto/serial/parallel agree on
+  success-vs-failure and on the exact decoded frame, and the strict
+  padding scanner stays panic-free — instead of only calling
+  `decode_frame`. `tests/round404_decode_surface_agreement.rs` is the
+  deterministic in-CI mirror (xorshift64\* PRNG, no deps): ~1500
+  self-encoded valid streams across the full FourCC × predictor ×
+  slice-count matrix (plus a 256×256 / 8-slice frame that crosses the
+  64 Ki-pixel auto-parallel threshold) and ~5000 arbitrary-byte payloads,
+  re-checking the round-335 padding contract from generated streams. No
+  divergence was found — every surface is bit-exact equivalent on every
+  valid stream.
 - **Cross-surface reference conformance.** All reference fixtures are
   additionally driven through `decode_frame_strict` (a spec-conformant
   encoder zero-pads each slice to its word boundary per `spec/05` §4.3,
