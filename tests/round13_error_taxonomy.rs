@@ -88,6 +88,10 @@ fn every_variant() -> Vec<Error> {
         Error::SliceNotWordAligned(11),
         Error::KraftViolation,
         Error::MultipleSingleSymbolSentinels,
+        Error::SingleSymbolPlaneHasSliceData {
+            plane: 0,
+            slice_data_len: 4,
+        },
         Error::HuffmanDecodeFailure { bit_position: 17 },
         Error::SliceTruncated {
             bit_position: 99,
@@ -268,6 +272,10 @@ fn category_malformed_stream_variants() {
         Error::SliceNotWordAligned(5),
         Error::KraftViolation,
         Error::MultipleSingleSymbolSentinels,
+        Error::SingleSymbolPlaneHasSliceData {
+            plane: 0,
+            slice_data_len: 4,
+        },
         Error::HuffmanDecodeFailure { bit_position: 0 },
         Error::SliceTruncated {
             bit_position: 0,
@@ -391,10 +399,10 @@ fn category_count_matches_variant_count() {
     // overall fixture count. A drift trips the round-13 partition
     // invariant.
     let total = every_variant().len();
-    // 9 malformed + 4 api-misuse + 3 unsupported + 4 stream-shape = 20.
+    // 10 malformed + 4 api-misuse + 3 unsupported + 4 stream-shape = 21.
     assert_eq!(
-        total, 20,
-        "every_variant() length drifted from expected 20 — update round13_error_taxonomy.rs"
+        total, 21,
+        "every_variant() length drifted from expected 21 — update round13_error_taxonomy.rs"
     );
 }
 

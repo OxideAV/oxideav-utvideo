@@ -268,6 +268,20 @@ fn parse_payload<'a>(cfg: &StreamConfig, chunk_payload: &'a [u8]) -> Result<Pars
         }
 
         let table = HuffmanTable::build(&code_length)?;
+
+        // spec/05 §6.1: a single-symbol plane (one `code_length = 0`
+        // sentinel, all others 255) emits its symbol for every pixel and
+        // carries **zero** slice-data bytes (an all-zero slice-end-offset
+        // table). A codelen-0 descriptor paired with a non-empty
+        // slice-data segment is self-inconsistent; reject it rather than
+        // silently discard the stray bytes.
+        if table.single_symbol.is_some() && slice_data_total != 0 {
+            return Err(Error::SingleSymbolPlaneHasSliceData {
+                plane: plane_idx,
+                slice_data_len: slice_data_total,
+            });
+        }
+
         planes.push(ParsedPlane {
             label: PlaneLabel::for_fourcc(cfg.fourcc, plane_idx),
             width: pw,

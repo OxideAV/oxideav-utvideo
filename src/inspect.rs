@@ -824,6 +824,17 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
         let slice_data_total = *end_offsets.last().unwrap();
         let slice_data_start = offset;
 
+        // spec/05 §6.1: a single-symbol plane carries zero slice-data
+        // bytes. Surface the same `Error::SingleSymbolPlaneHasSliceData`
+        // the full decoder would, keeping the decode-free walk in lockstep
+        // with `decode_frame` on this malformed shape.
+        if is_single_symbol && slice_data_total != 0 {
+            return Err(Error::SingleSymbolPlaneHasSliceData {
+                plane: plane_idx,
+                slice_data_len: slice_data_total,
+            });
+        }
+
         if offset + slice_data_total > frame_info_off {
             return Err(Error::ChunkTooShort {
                 offset,

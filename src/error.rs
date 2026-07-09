@@ -78,6 +78,18 @@ pub enum Error {
     /// `code_length = 0`. Malformed; rejected per `spec/05` §11.
     MultipleSingleSymbolSentinels,
 
+    /// A plane whose Huffman descriptor is the single-symbol special
+    /// case (exactly one `code_length = 0`, all others `255`) carried a
+    /// non-zero slice-data byte count. `spec/05` §6.1 fixes the
+    /// single-symbol plane's slice-data length at exactly 0 (the symbol
+    /// consumes zero bits and is emitted for every pixel), with an
+    /// all-zero slice-end-offset table. A codelen-0 descriptor paired
+    /// with a non-empty slice-data segment is self-inconsistent; a
+    /// defensive decoder rejects it rather than silently discard the
+    /// stray bytes. `plane` locates the offending plane in on-wire
+    /// order; `slice_data_len` is the declared byte count.
+    SingleSymbolPlaneHasSliceData { plane: usize, slice_data_len: usize },
+
     /// A bit-prefix in slice data did not match any code in the
     /// constructed Huffman table. The slice is malformed.
     HuffmanDecodeFailure { bit_position: usize },
@@ -188,6 +200,14 @@ impl core::fmt::Display for Error {
             Error::MultipleSingleSymbolSentinels => {
                 f.write_str("oxideav-utvideo: multiple code_length=0 sentinels")
             }
+            Error::SingleSymbolPlaneHasSliceData {
+                plane,
+                slice_data_len,
+            } => write!(
+                f,
+                "oxideav-utvideo: single-symbol plane {plane} carries {slice_data_len} slice-data \
+                 bytes (spec/05 §6.1 requires zero)"
+            ),
             Error::HuffmanDecodeFailure { bit_position } => write!(
                 f,
                 "oxideav-utvideo: Huffman bit-prefix unmatched at bit {bit_position}"
@@ -283,8 +303,9 @@ pub enum ErrorCategory {
     /// Per-frame wire bytes do not match `spec/02` + `spec/05`.
     /// Examples: `ChunkTooShort`, `NonMonotonicSliceOffsets`,
     /// `SliceNotWordAligned`, `KraftViolation`,
-    /// `MultipleSingleSymbolSentinels`, `HuffmanDecodeFailure`,
-    /// `SliceTruncated`, `NonZeroPadding`, `MissingFrameInfo`.
+    /// `MultipleSingleSymbolSentinels`, `SingleSymbolPlaneHasSliceData`,
+    /// `HuffmanDecodeFailure`, `SliceTruncated`, `NonZeroPadding`,
+    /// `MissingFrameInfo`.
     MalformedStream,
     /// Caller-side typed contract violation. Examples:
     /// `EncoderPlaneSizeMismatch`, `InvalidSliceCount`,
@@ -335,6 +356,7 @@ impl Error {
             | Error::SliceNotWordAligned(_)
             | Error::KraftViolation
             | Error::MultipleSingleSymbolSentinels
+            | Error::SingleSymbolPlaneHasSliceData { .. }
             | Error::HuffmanDecodeFailure { .. }
             | Error::SliceTruncated { .. }
             | Error::NonZeroPadding { .. }
