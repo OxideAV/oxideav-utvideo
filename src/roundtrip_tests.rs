@@ -5,7 +5,7 @@
 //! The encoder is the in-crate test-only synthesiser (`encoder.rs`)
 //! mirroring the wire format the decoder consumes; the goal is to
 //! pin **decoder correctness against its own encoder** across every
-//! supported FOURCC × predictor × slice-count combination. FFmpeg
+//! supported FOURCC × predictor × slice-count combination. De-facto-encoder
 //! byte-equality is not in scope (round 1 deliberately defers
 //! that to a later round once a fixture corpus lands in `tables/`).
 

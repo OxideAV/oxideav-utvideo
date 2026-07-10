@@ -2,8 +2,8 @@
 //!
 //! Round 1 scope: produce wire-format frame bodies that the in-crate
 //! decoder ([`crate::decoder::decode_frame`]) accepts and round-trips
-//! byte-for-byte. The encoder does NOT attempt FFmpeg byte-equality;
-//! the Specifier work documents only what FFmpeg writes, and the
+//! byte-for-byte. The encoder does NOT attempt de-facto-encoder byte-equality;
+//! the Specifier work documents only the canonical carriage form, and the
 //! 2026-05-06 audit retired the prior implementation precisely
 //! because emitter byte-equality was the conformance criterion. Round
 //! 1 picks the strictest *decoder*-driven test instead: feed our own
@@ -308,7 +308,7 @@ fn build_plane_huffman(slice_residuals: &[Vec<u8>]) -> Result<([u8; 256], Huffma
 
     // General case: build canonical Huffman code lengths via a
     // length-limited package-merge (length cap = 16, matching the
-    // empirical maximum across the FFmpeg corpus per `spec/05` §7).
+    // empirical maximum across the reference corpus per `spec/05` §7).
     let lengths = build_lengths(&counts, 16)?;
 
     let mut descriptor = [255u8; 256];

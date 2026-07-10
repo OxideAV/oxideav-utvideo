@@ -279,7 +279,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 ///   audit of this category.
 /// - [`ApiMisuse`](ErrorCategory::ApiMisuse) — the caller violated
 ///   the typed contract of [`crate::encode_frame`] /
-///   [`crate::StreamConfig::new`] / [`crate::Extradata::ffmpeg_for`]
+///   [`crate::StreamConfig::new`] / [`crate::Extradata::canonical_extradata_for`]
 ///   (e.g. wrong plane count, mis-sized per-plane buffer, slice
 ///   count outside `1..=256`, zero width/height). These are
 ///   programming bugs the caller can fix with a corrected call;

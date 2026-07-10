@@ -640,7 +640,7 @@ impl FrameLayout {
 ///
 /// `frame_info` bit layout per `spec/02` §6.1:
 ///
-/// - bits 0..7: reserved (FFmpeg writes 0).
+/// - bits 0..7: reserved (canonical form writes 0).
 /// - bits 8..9: predictor mode (0 = none, 1 = left, 2 = gradient,
 ///   3 = median).
 /// - bits 10..31: reserved.
@@ -918,7 +918,7 @@ mod tests {
     use crate::fourcc::{Extradata, Fourcc};
 
     fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {
-        let extradata = Extradata::ffmpeg_for(fc, slices).unwrap();
+        let extradata = Extradata::canonical_extradata_for(fc, slices).unwrap();
         StreamConfig::new(fc, w, h, extradata).unwrap()
     }
 

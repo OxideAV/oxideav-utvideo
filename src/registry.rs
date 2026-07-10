@@ -215,8 +215,8 @@ fn fourcc_from_pixel_format(fmt: PixelFormat) -> Option<Fourcc> {
 /// `params.pixel_format` together with `params.width` / `params.height`
 /// and `params.extradata` (16 bytes per `spec/01` §4). When the tag is
 /// absent we derive it from the pixel format; when extradata is empty
-/// we synthesise the FFmpeg-pinned 16-byte block via
-/// [`Extradata::ffmpeg_for`] so encoder construction stays a
+/// we synthesise the canonical 16-byte block via
+/// [`Extradata::canonical_extradata_for`] so encoder construction stays a
 /// single-call API for callers driving us through the framework's
 /// [`Encoder`] trait without staging a separate extradata builder.
 fn build_encoder_config(params: &CodecParameters) -> CoreResult<StreamConfig> {
@@ -247,7 +247,7 @@ fn build_encoder_config(params: &CodecParameters) -> CoreResult<StreamConfig> {
         // builder. Containers that round-trip a populated extradata
         // through demux → re-encode get exact byte-equality with the
         // input via the populated branch below.
-        Extradata::ffmpeg_for(fourcc, 1)
+        Extradata::canonical_extradata_for(fourcc, 1)
             .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?
     } else {
         Extradata::parse(&params.extradata)
@@ -469,7 +469,7 @@ mod tests {
         p.width = Some(width);
         p.height = Some(height);
         p.tag = Some(CodecTag::fourcc(fourcc.as_bytes()));
-        p.extradata = Extradata::ffmpeg_for(fourcc, 1)
+        p.extradata = Extradata::canonical_extradata_for(fourcc, 1)
             .unwrap()
             .to_bytes()
             .to_vec();
@@ -557,7 +557,7 @@ mod tests {
         p.width = Some(16);
         p.height = Some(16);
         p.tag = Some(CodecTag::fourcc(Fourcc::Uly0.as_bytes()));
-        p.extradata = Extradata::ffmpeg_for(Fourcc::Uly0, 1)
+        p.extradata = Extradata::canonical_extradata_for(Fourcc::Uly0, 1)
             .unwrap()
             .to_bytes()
             .to_vec();

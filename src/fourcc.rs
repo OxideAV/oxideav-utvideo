@@ -9,7 +9,7 @@
 
 use crate::error::{Error, Result};
 
-/// One of the five Ut Video FourCCs accepted by FFmpeg 7.1.2 per
+/// One of the five Ut Video FourCCs in the canonical container carriage per
 /// `spec/01` §2. Drives plane count, plane layout, and chroma
 /// subsampling for everything downstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,7 +94,7 @@ impl Fourcc {
         }
     }
 
-    /// The 4-byte source-format tag FFmpeg 7.1.2 writes at extradata
+    /// The 4-byte source-format tag written at extradata
     /// offset `+0x04` for this FOURCC, per `spec/01` §2.2 + §5 (test
     /// set `T1`):
     ///
@@ -109,8 +109,8 @@ impl Fourcc {
     /// Encoders MAY mirror this tag for AVI / VfW interop; decoders MAY
     /// ignore it (round-1 audit §5.2: implementer-resolvable open
     /// question 2 — RGB source-format tag structure is hypothesis-only,
-    /// but the four bytes themselves are FFmpeg-pinned).
-    pub fn ffmpeg_source_format_tag(self) -> [u8; 4] {
+    /// but the four bytes themselves are canonical).
+    pub fn source_format_tag(self) -> [u8; 4] {
         match self {
             Fourcc::Uly0 => *b"YV12",
             Fourcc::Uly2 => *b"YUY2",
@@ -191,7 +191,7 @@ pub struct Extradata {
     /// ignore. Stored as raw bytes since the wiki says "BE" but the
     /// observed values are not always printable.
     pub source_format_tag: [u8; 4],
-    /// `+0x08`: frame-info-size — must be 4 in the FFmpeg corpus.
+    /// `+0x08`: frame-info-size — must be 4 in the reference corpus.
     pub frame_info_size: u32,
     /// `+0x0c`: encoding flags — Huffman bit, interlaced bit, slice
     /// count high byte.
@@ -235,13 +235,13 @@ impl Extradata {
         (((self.flags >> 24) & 0xff) as usize) + 1
     }
 
-    /// Build a 16-byte extradata block matching what FFmpeg 7.1.2's
+    /// Build a 16-byte extradata block matching the canonical form's
     /// `utvideo` encoder writes for `fourcc` with `num_slices` slices,
     /// per `spec/01` §5 (test set `T1`) + §4.4.3 (slice-count formula):
     ///
-    /// - `encoder_version = 0x0100_00f0` (constant across the FFmpeg
+    /// - `encoder_version = 0x0100_00f0` (constant across the reference
     ///   corpus, per `spec/01` §4.1).
-    /// - `source_format_tag = ffmpeg_source_format_tag(fourcc)` per
+    /// - `source_format_tag = source_format_tag(fourcc)` per
     ///   `spec/01` §2.2 + §5.
     /// - `frame_info_size = 4` per `spec/01` §4.3.
     /// - `flags = 0x0000_0001 | ((num_slices - 1) << 24)` — Huffman bit
@@ -253,16 +253,16 @@ impl Extradata {
     /// `0xff` → 256 slices).
     ///
     /// This builder closes audit/00-report.md §5.2 open items 1 and 2
-    /// in the implementer-resolvable direction: mirror the FFmpeg
+    /// in the implementer-resolvable direction: mirror the canonical
     /// values exactly so a synthesised stream is byte-identical to
-    /// what FFmpeg would have written at the extradata level.
-    pub fn ffmpeg_for(fourcc: Fourcc, num_slices: usize) -> Result<Self> {
+    /// the canonical extradata carriage.
+    pub fn canonical_extradata_for(fourcc: Fourcc, num_slices: usize) -> Result<Self> {
         if num_slices == 0 || num_slices > 256 {
             return Err(Error::InvalidSliceCount);
         }
         Ok(Self {
             encoder_version: 0x0100_00f0,
-            source_format_tag: fourcc.ffmpeg_source_format_tag(),
+            source_format_tag: fourcc.source_format_tag(),
             frame_info_size: 4,
             flags: 0x0000_0001 | (((num_slices as u32 - 1) & 0xff) << 24),
         })
@@ -271,7 +271,7 @@ impl Extradata {
     /// Serialise to 16 bytes in the order
     /// `encoder_version | source_format_tag | frame_info_size | flags`.
     /// Used by the test-only encoder (mod `encoder`) to mirror what
-    /// FFmpeg writes.
+    /// the canonical form uses.
     pub fn to_bytes(&self) -> [u8; 16] {
         let mut out = [0u8; 16];
         out[0..4].copy_from_slice(&self.encoder_version.to_le_bytes());
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn extradata_parse_ffmpeg_uly0_fixture() {
+    fn extradata_parse_canonical_uly0_fixture() {
         // Per spec/01 §5: T1-uly0 extradata bytes.
         let raw = [
             0xf0, 0x00, 0x00, 0x01, 0x59, 0x56, 0x31, 0x32, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00,
@@ -459,26 +459,20 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_source_format_tag_pinned_per_spec01_t1() {
+    fn source_format_tag_pinned_per_spec01_t1() {
         // spec/01 §2.2 + §5 test-set T1.
-        assert_eq!(&Fourcc::Uly0.ffmpeg_source_format_tag(), b"YV12");
-        assert_eq!(&Fourcc::Uly2.ffmpeg_source_format_tag(), b"YUY2");
-        assert_eq!(&Fourcc::Uly4.ffmpeg_source_format_tag(), b"YV24");
-        assert_eq!(
-            Fourcc::Ulrg.ffmpeg_source_format_tag(),
-            [0x00, 0x00, 0x01, 0x18]
-        );
-        assert_eq!(
-            Fourcc::Ulra.ffmpeg_source_format_tag(),
-            [0x00, 0x00, 0x02, 0x18]
-        );
+        assert_eq!(&Fourcc::Uly0.source_format_tag(), b"YV12");
+        assert_eq!(&Fourcc::Uly2.source_format_tag(), b"YUY2");
+        assert_eq!(&Fourcc::Uly4.source_format_tag(), b"YV24");
+        assert_eq!(Fourcc::Ulrg.source_format_tag(), [0x00, 0x00, 0x01, 0x18]);
+        assert_eq!(Fourcc::Ulra.source_format_tag(), [0x00, 0x00, 0x02, 0x18]);
     }
 
     #[test]
-    fn extradata_ffmpeg_for_builder_matches_spec01_t1_uly0() {
+    fn extradata_canonical_extradata_for_builder_matches_spec01_t1_uly0() {
         // spec/01 §5 T1-uly0 reference extradata bytes (1 slice):
         // f0 00 00 01 59 56 31 32 04 00 00 00 01 00 00 00
-        let ed = Extradata::ffmpeg_for(Fourcc::Uly0, 1).unwrap();
+        let ed = Extradata::canonical_extradata_for(Fourcc::Uly0, 1).unwrap();
         assert_eq!(
             ed.to_bytes(),
             [
@@ -490,8 +484,8 @@ mod tests {
     }
 
     #[test]
-    fn extradata_ffmpeg_for_builder_matches_spec01_t1_uly2() {
-        let ed = Extradata::ffmpeg_for(Fourcc::Uly2, 1).unwrap();
+    fn extradata_canonical_extradata_for_builder_matches_spec01_t1_uly2() {
+        let ed = Extradata::canonical_extradata_for(Fourcc::Uly2, 1).unwrap();
         assert_eq!(
             ed.to_bytes(),
             [
@@ -502,8 +496,8 @@ mod tests {
     }
 
     #[test]
-    fn extradata_ffmpeg_for_builder_matches_spec01_t1_uly4() {
-        let ed = Extradata::ffmpeg_for(Fourcc::Uly4, 1).unwrap();
+    fn extradata_canonical_extradata_for_builder_matches_spec01_t1_uly4() {
+        let ed = Extradata::canonical_extradata_for(Fourcc::Uly4, 1).unwrap();
         assert_eq!(
             ed.to_bytes(),
             [
@@ -514,8 +508,8 @@ mod tests {
     }
 
     #[test]
-    fn extradata_ffmpeg_for_builder_matches_spec01_t1_ulrg() {
-        let ed = Extradata::ffmpeg_for(Fourcc::Ulrg, 1).unwrap();
+    fn extradata_canonical_extradata_for_builder_matches_spec01_t1_ulrg() {
+        let ed = Extradata::canonical_extradata_for(Fourcc::Ulrg, 1).unwrap();
         assert_eq!(
             ed.to_bytes(),
             [
@@ -526,8 +520,8 @@ mod tests {
     }
 
     #[test]
-    fn extradata_ffmpeg_for_builder_matches_spec01_t1_ulra() {
-        let ed = Extradata::ffmpeg_for(Fourcc::Ulra, 1).unwrap();
+    fn extradata_canonical_extradata_for_builder_matches_spec01_t1_ulra() {
+        let ed = Extradata::canonical_extradata_for(Fourcc::Ulra, 1).unwrap();
         assert_eq!(
             ed.to_bytes(),
             [
@@ -538,33 +532,33 @@ mod tests {
     }
 
     #[test]
-    fn extradata_ffmpeg_for_encodes_slice_count_high_byte() {
+    fn extradata_canonical_extradata_for_encodes_slice_count_high_byte() {
         // spec/01 §4.4.3: high byte of `flags` encodes `num_slices - 1`.
         // Slice count 4 → flags top byte 0x03.
-        let ed = Extradata::ffmpeg_for(Fourcc::Uly0, 4).unwrap();
+        let ed = Extradata::canonical_extradata_for(Fourcc::Uly0, 4).unwrap();
         assert_eq!(ed.num_slices(), 4);
         assert_eq!((ed.flags >> 24) & 0xff, 0x03);
 
         // Slice count 256 → flags top byte 0xff (the maximum).
-        let ed = Extradata::ffmpeg_for(Fourcc::Uly4, 256).unwrap();
+        let ed = Extradata::canonical_extradata_for(Fourcc::Uly4, 256).unwrap();
         assert_eq!(ed.num_slices(), 256);
         assert_eq!((ed.flags >> 24) & 0xff, 0xff);
     }
 
     #[test]
-    fn extradata_ffmpeg_for_rejects_out_of_range_slices() {
+    fn extradata_canonical_extradata_for_rejects_out_of_range_slices() {
         assert!(matches!(
-            Extradata::ffmpeg_for(Fourcc::Uly0, 0),
+            Extradata::canonical_extradata_for(Fourcc::Uly0, 0),
             Err(Error::InvalidSliceCount)
         ));
         assert!(matches!(
-            Extradata::ffmpeg_for(Fourcc::Uly0, 257),
+            Extradata::canonical_extradata_for(Fourcc::Uly0, 257),
             Err(Error::InvalidSliceCount)
         ));
     }
 
     #[test]
-    fn extradata_ffmpeg_for_round_trips_through_parse() {
+    fn extradata_canonical_extradata_for_round_trips_through_parse() {
         // Building via the new helper then re-parsing must reproduce
         // an equal Extradata for every FOURCC at slice counts 1, 16, 256.
         for &fc in &[
@@ -575,7 +569,7 @@ mod tests {
             Fourcc::Ulra,
         ] {
             for &slices in &[1usize, 16, 256] {
-                let ed = Extradata::ffmpeg_for(fc, slices).unwrap();
+                let ed = Extradata::canonical_extradata_for(fc, slices).unwrap();
                 let bytes = ed.to_bytes();
                 let parsed = Extradata::parse(&bytes).unwrap();
                 assert_eq!(parsed, ed, "round-trip fc={fc:?} slices={slices}");
