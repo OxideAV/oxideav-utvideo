@@ -52,11 +52,12 @@ fn build_plane(width: usize, height: usize, plane: usize) -> Vec<u8> {
     out
 }
 
-/// Build a `StreamConfig` matching the FFmpeg 7.1.2 extradata layout
+/// Build a `StreamConfig` matching the canonical extradata layout
 /// for `(fc, num_slices)` (`spec/01` §4.4.3 — flag bit 0 set, slice
 /// count high byte = `num_slices - 1`).
 fn stream_cfg(fc: Fourcc, w: u32, h: u32, num_slices: usize) -> StreamConfig {
-    let extradata = Extradata::ffmpeg_for(fc, num_slices).expect("ffmpeg_for");
+    let extradata =
+        Extradata::canonical_extradata_for(fc, num_slices).expect("canonical_extradata_for");
     StreamConfig::new(fc, w, h, extradata).expect("StreamConfig::new")
 }
 

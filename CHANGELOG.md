@@ -130,7 +130,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   slice shape end to end, including via the inspector's row accessors
   and the strict / serial / parallel decode paths.
 - **Extradata builder pinned to captured wire bytes.**
-  `Extradata::ffmpeg_for(fourcc, num_slices).to_bytes()` must equal the
+  `Extradata::canonical_extradata_for(fourcc, num_slices).to_bytes()` must equal the
   actual 16-byte extradata of every reference stream — all five
   FourCCs' `spec/01` §2.2 source-format tags (including the non-FOURCC
   ULRG/ULRA `00 00 01 18` / `00 00 02 18` encodings) and §2.4 flag
@@ -686,7 +686,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     * validates dims via `StreamConfig::new` (ULY0 even-W+H, ULY2
       even-W) at factory time;
     * synthesises a default-slice extradata via
-      `Extradata::ffmpeg_for(fc, 1)` when `params.extradata` is empty,
+      `Extradata::canonical_extradata_for(fc, 1)` when `params.extradata` is empty,
       and preserves a populated 16-byte block verbatim (round-trips
       slice-count through to `output_params`);
     * accepts `Frame::Video` through `send_frame`, validates the plane
@@ -811,7 +811,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Round 9 — descriptor-mutation rejection + encoder API misuse + bit-pack/unpack invariants
 - Round 8 — malformed-payload decode robustness (negative tests)
 - Round 7 — encoder byte-stability (idempotency) + full 1..256 slice sweep
-- Round 6 — FFmpeg-pinned extradata builder + content-fixture corpus
+- Round 6 — canonical extradata builder + content-fixture corpus
 - Round 5 — slice-parallel encode via std::thread::scope
 - Round 4 — slice-parallel decode via std::thread::scope
 - Round 3 — LUT-accelerated Huffman decoder + word-aligned bit peek
@@ -924,7 +924,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Plus a Round-1 message-accuracy fix: `Error::InvalidSliceCount`
   Display previously read `"num_slices == 0"`, but the variant is
-  also produced for `num_slices > 256` (encoder, `Extradata::ffmpeg_for`,
+  also produced for `num_slices > 256` (encoder, `Extradata::canonical_extradata_for`,
   decoder). The new message names the full valid range:
   `"num_slices out of range (must be 1..=256 per spec/01 §4.4.3)"`.
   A regression test pins both the new message form and the absence
@@ -1089,7 +1089,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       (the wire formula caps at 256).
     - `DimensionConstraint` for ULY0 with odd width (`spec/02` §3.2).
 
-  - **`Extradata::ffmpeg_for` boundary** (3 tests). Round 6 tested the
+  - **`Extradata::canonical_extradata_for` boundary** (3 tests). Round 6 tested the
     happy case; this adds the explicit rejection arms (0 slices and
     257 slices → `InvalidSliceCount`) and the upper-bound success case
     (256 slices → `flags` high byte = `0xff`, `num_slices() == 256`).
@@ -1209,18 +1209,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   content source is a self-contained PRNG with no codec provenance.
   **107 tests** (+7), all green.
 
-- **Round 6 — FFmpeg-pinned extradata builder + content-fixture corpus.**
-  New [`Extradata::ffmpeg_for(fourcc, num_slices)`] builder produces the
-  16-byte extradata block FFmpeg 7.1.2's `utvideo` encoder writes for
+- **Round 6 — canonical extradata builder + content-fixture corpus.**
+  New [`Extradata::canonical_extradata_for(fourcc, num_slices)`] builder produces the
+  16-byte canonical extradata block for
   every FOURCC at every slice count `1..=256`, byte-identical to
-  `spec/01` §5 test-set `T1`. New [`Fourcc::ffmpeg_source_format_tag`]
+  `spec/01` §5 test-set `T1`. New [`Fourcc::source_format_tag`]
   accessor exposes the per-FOURCC 4-byte tag (`"YV12"` / `"YUY2"` /
   `"YV24"` / `00 00 01 18` / `00 00 02 18`) without forcing the caller
   to construct an Extradata. Together these close
   [`audit/00-report.md`](../../docs/video/utvideo/audit/00-report.md)
   §5.2 implementer-resolvable open items 1 (encoder-version: mirror
-  FFmpeg's `0x0100_00f0`) and 2 (RGB source-format tag: mirror
-  FFmpeg's `00 00 01 18` / `00 00 02 18`).
+  the canonical `0x0100_00f0`) and 2 (RGB source-format tag: mirror
+  the canonical `00 00 01 18` / `00 00 02 18`).
 
   New content-fixture corpus (`tests/round6_content_fixtures.rs`)
   exercises eight content-style synthetic patterns (solid, horizontal
@@ -1231,7 +1231,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measurement. Beyond the existing round-2 self-roundtrip equality,
   round-6 introduces **compressed-size bounds** as audit/01 §8 item 4
   ("wider slice-count and resolution corpus … compressed size within
-  X% of FFmpeg") recommended:
+  X% of a third-party encoder") recommended:
 
   - **Universal upper bound** on every cell: `8 bits/sample ×
     total_samples + per-plane overhead`, with 10% slack. Catches an
@@ -1402,7 +1402,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Round 1 — classic-family decoder + encoder.** Full Ut Video
   classic-family wire-format support: ULRG / ULRA / ULY0 / ULY2 /
   ULY4. Built clean-room against `docs/video/utvideo/spec/00..06`
-  (no FFmpeg / Win32 / VLC source read). Public surface:
+  (no external-implementation source read). Public surface:
   - [`Fourcc`] (5 variants) + [`Extradata`] parsing per `spec/01`.
   - [`decode_frame`] — `00dc` chunk payload → per-plane decoded
     samples; walks plane-by-plane per `spec/02`, applies the
@@ -1431,7 +1431,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   workspace policy: that work belongs in `oxideav-avi`. Callers
   hand us [`StreamConfig`] + `00dc` chunk-payload bytes; we hand
   back per-plane samples.
-- Round 1 deliberately defers FFmpeg byte-equality (no behavioural
+- Round 1 deliberately defers de-facto-encoder byte-equality (no behavioural
   fixture corpus is in `tables/` yet); decoder correctness is
   pinned by an in-crate self-roundtrip and by spec-derived unit
   tests reproducing the byte traces in `spec/05` §3.1 verbatim.

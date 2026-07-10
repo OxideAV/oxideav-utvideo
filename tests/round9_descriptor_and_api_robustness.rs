@@ -20,7 +20,7 @@
 //! 1. **Encoder input rejection.** `encoder::prepare_planes` checks
 //!    `EncoderPlaneSizeMismatch`, `InvalidSliceCount`, and dimension
 //!    constraints. None of these had an integration test.
-//! 2. **`Extradata::ffmpeg_for` boundary.** Round 6 tested the happy
+//! 2. **`Extradata::canonical_extradata_for` boundary.** Round 6 tested the happy
 //!    case (1 slice) and `num_slices == 256`; the explicit
 //!    `Err(InvalidSliceCount)` arm at `num_slices == 0` and `> 256`
 //!    had no test.
@@ -410,13 +410,13 @@ fn encoder_rejects_odd_dim_uly0() {
 }
 
 // ---------------------------------------------------------------------
-// `Extradata::ffmpeg_for` boundary checks.
+// `Extradata::canonical_extradata_for` boundary checks.
 // ---------------------------------------------------------------------
 
 /// `num_slices == 0` is `InvalidSliceCount` from the builder.
 #[test]
-fn extradata_ffmpeg_for_rejects_zero_slices() {
-    let err = Extradata::ffmpeg_for(Fourcc::Uly0, 0).unwrap_err();
+fn extradata_canonical_extradata_for_rejects_zero_slices() {
+    let err = Extradata::canonical_extradata_for(Fourcc::Uly0, 0).unwrap_err();
     assert!(
         matches!(err, Error::InvalidSliceCount),
         "expected InvalidSliceCount, got {err:?}",
@@ -425,13 +425,13 @@ fn extradata_ffmpeg_for_rejects_zero_slices() {
 
 /// `num_slices > 256` is `InvalidSliceCount` from the builder.
 #[test]
-fn extradata_ffmpeg_for_rejects_excess_slices() {
-    let err = Extradata::ffmpeg_for(Fourcc::Uly0, 257).unwrap_err();
+fn extradata_canonical_extradata_for_rejects_excess_slices() {
+    let err = Extradata::canonical_extradata_for(Fourcc::Uly0, 257).unwrap_err();
     assert!(
         matches!(err, Error::InvalidSliceCount),
         "expected InvalidSliceCount, got {err:?}",
     );
-    let err = Extradata::ffmpeg_for(Fourcc::Uly0, usize::MAX).unwrap_err();
+    let err = Extradata::canonical_extradata_for(Fourcc::Uly0, usize::MAX).unwrap_err();
     assert!(
         matches!(err, Error::InvalidSliceCount),
         "expected InvalidSliceCount, got {err:?}",
@@ -442,8 +442,8 @@ fn extradata_ffmpeg_for_rejects_excess_slices() {
 /// resulting `flags` field's high byte must be `0xff` per
 /// `spec/01` §4.4.3 (`((255 << 24)) | 1`).
 #[test]
-fn extradata_ffmpeg_for_accepts_256_slices() {
-    let ed = Extradata::ffmpeg_for(Fourcc::Uly0, 256).unwrap();
+fn extradata_canonical_extradata_for_accepts_256_slices() {
+    let ed = Extradata::canonical_extradata_for(Fourcc::Uly0, 256).unwrap();
     assert_eq!(ed.flags, 0x0000_0001 | (0xffu32 << 24));
     assert_eq!(ed.num_slices(), 256);
 }
@@ -456,7 +456,7 @@ fn extradata_ffmpeg_for_accepts_256_slices() {
 /// `width/height must be > 0`).
 #[test]
 fn stream_config_rejects_zero_width() {
-    let ed = Extradata::ffmpeg_for(Fourcc::Uly0, 1).unwrap();
+    let ed = Extradata::canonical_extradata_for(Fourcc::Uly0, 1).unwrap();
     let err = StreamConfig::new(Fourcc::Uly0, 0, 8, ed).unwrap_err();
     assert!(
         matches!(err, Error::DimensionConstraint(_)),
@@ -467,7 +467,7 @@ fn stream_config_rejects_zero_width() {
 /// Zero height is `DimensionConstraint`.
 #[test]
 fn stream_config_rejects_zero_height() {
-    let ed = Extradata::ffmpeg_for(Fourcc::Uly0, 1).unwrap();
+    let ed = Extradata::canonical_extradata_for(Fourcc::Uly0, 1).unwrap();
     let err = StreamConfig::new(Fourcc::Uly0, 8, 0, ed).unwrap_err();
     assert!(
         matches!(err, Error::DimensionConstraint(_)),
@@ -478,7 +478,7 @@ fn stream_config_rejects_zero_height() {
 /// ULY2 odd-height accepted (chroma-subsamples only by width).
 #[test]
 fn stream_config_uly2_accepts_odd_height() {
-    let ed = Extradata::ffmpeg_for(Fourcc::Uly2, 1).unwrap();
+    let ed = Extradata::canonical_extradata_for(Fourcc::Uly2, 1).unwrap();
     assert!(StreamConfig::new(Fourcc::Uly2, 8, 17, ed).is_ok());
 }
 

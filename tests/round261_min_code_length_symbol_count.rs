@@ -43,7 +43,7 @@ use oxideav_utvideo::{Extradata, Fourcc, Predictor, StreamConfig};
 /// from the field layout, then parsing it with [`Extradata::parse`].
 /// Uses the wire-format constructor path (no reference-encoder builder
 /// helper) — keeps the test independent of pending public-API scrubs
-/// on the `Extradata::ffmpeg_for` convenience constructor.
+/// on the `Extradata::canonical_extradata_for` convenience constructor.
 fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {
     assert!((1..=256).contains(&slices), "slices must be 1..=256");
     let source_tag = fc.as_bytes();
@@ -255,7 +255,7 @@ fn count_respects_kraft_upper_bound_on_min_length() {
             }
             // 2^min_code_length, computed without overflow for any
             // min in 1..=31 (the practical encoder range — the wire
-            // format permits up to 254 but ffmpeg-observed code
+            // format permits up to 254 but the reference-observed code
             // lengths stay below 32 per `spec/05` §7.1).
             let kraft_bound: u64 = 1u64 << p.min_code_length.min(63);
             assert!(

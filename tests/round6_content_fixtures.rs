@@ -183,10 +183,10 @@ fn build_frame(
 }
 
 fn stream_config(fc: Fourcc, width: u32, height: u32, num_slices: usize) -> StreamConfig {
-    // Use the new spec-pinned FFmpeg-compatible extradata builder so
+    // Use the new spec-pinned canonical extradata builder so
     // any compressed-size drift across the builder change shows up
     // here too.
-    let extradata = Extradata::ffmpeg_for(fc, num_slices).unwrap();
+    let extradata = Extradata::canonical_extradata_for(fc, num_slices).unwrap();
     StreamConfig::new(fc, width, height, extradata).unwrap()
 }
 
@@ -398,15 +398,15 @@ fn larger_resolution_parallel_decode_corpus_256x192_8slices() {
 }
 
 // ----------------------------------------------------------------------
-// FFmpeg-extradata interop smoke
+// canonical-extradata interop smoke
 // ----------------------------------------------------------------------
 
 #[test]
-fn extradata_ffmpeg_builder_drives_real_decode() {
-    // Build a frame using the new Extradata::ffmpeg_for() helper and
+fn extradata_canonical_builder_drives_real_decode() {
+    // Build a frame using the new Extradata::canonical_extradata_for() helper and
     // decode it. The decoder's `Extradata::parse` already accepts the
     // bytes (covered by fourcc.rs unit tests); this confirms the full
-    // encode-then-decode path works end-to-end with the FFmpeg-mirrored
+    // encode-then-decode path works end-to-end with the canonical-carriage
     // values across every FOURCC.
     for &fc in &[
         Fourcc::Uly0,
@@ -428,10 +428,7 @@ fn extradata_ffmpeg_builder_drives_real_decode() {
         // Verify the extradata bytes themselves still match what we
         // documented per spec/01 §5.
         assert_eq!(cfg.extradata.encoder_version, 0x0100_00f0);
-        assert_eq!(
-            cfg.extradata.source_format_tag,
-            fc.ffmpeg_source_format_tag()
-        );
+        assert_eq!(cfg.extradata.source_format_tag, fc.source_format_tag());
         assert_eq!(cfg.extradata.frame_info_size, 4);
         assert_eq!(cfg.extradata.flags & 0x0000_0001, 1);
     }
@@ -448,10 +445,10 @@ fn extradata_ffmpeg_builder_drives_real_decode() {
 /// pointing at the cell so the regression is visible.
 ///
 /// The numbers below were captured at commit-time on the in-crate
-/// encoder. They are **not** byte-equality targets against FFmpeg —
+/// encoder. They are **not** byte-equality targets against a third-party encoder —
 /// the audit's round-2..round-5 work showed our encoder's Huffman
-/// length-limited tie-break differs from FFmpeg's in some cells, and
-/// the round-1 README explicitly disclaims FFmpeg byte-equality. The
+/// length-limited tie-break differs from the de-facto encoder's in some cells, and
+/// the round-1 README explicitly disclaims de-facto-encoder byte-equality. The
 /// numbers here are *the in-crate encoder's own output*, locked down.
 #[test]
 fn compressed_size_headline_uly0_128x96() {

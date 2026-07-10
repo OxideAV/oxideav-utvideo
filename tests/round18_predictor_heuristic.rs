@@ -54,7 +54,7 @@ fn build_params(fourcc: Fourcc, width: u32, height: u32) -> CodecParameters {
     p.width = Some(width);
     p.height = Some(height);
     p.tag = Some(CodecTag::fourcc(fourcc.as_bytes()));
-    p.extradata = oxideav_utvideo::fourcc::Extradata::ffmpeg_for(fourcc, 1)
+    p.extradata = oxideav_utvideo::fourcc::Extradata::canonical_extradata_for(fourcc, 1)
         .unwrap()
         .to_bytes()
         .to_vec();
@@ -513,7 +513,7 @@ fn direct_api_still_accepts_explicit_predictor() {
     );
 
     // Both must still decode back to the input.
-    let extradata = oxideav_utvideo::fourcc::Extradata::ffmpeg_for(fc, 1).unwrap();
+    let extradata = oxideav_utvideo::fourcc::Extradata::canonical_extradata_for(fc, 1).unwrap();
     let cfg = oxideav_utvideo::fourcc::StreamConfig::new(fc, w, h, extradata).unwrap();
     let dec_none = decode_frame(&cfg, &bytes_none).unwrap();
     let dec_grad = decode_frame(&cfg, &bytes_grad).unwrap();

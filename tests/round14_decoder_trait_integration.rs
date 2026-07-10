@@ -18,7 +18,7 @@
 //!
 //! 1. **Factory happy path on every FourCC.** Resolve the FourCC →
 //!    codec id via the registry, then `make_decoder` with extradata
-//!    `Extradata::ffmpeg_for(fc, slices).to_bytes()` + dims yields a
+//!    `Extradata::canonical_extradata_for(fc, slices).to_bytes()` + dims yields a
 //!    `Box<dyn Decoder>` that, fed a packet our `encode_frame` produced,
 //!    returns a [`Frame::Video`] with the expected plane count + per-
 //!    plane stride + per-plane payload-size pinned to FOURCC-derived
@@ -80,7 +80,7 @@ fn make_params(fc: Fourcc, w: u32, h: u32, slices: usize) -> CodecParameters {
     params.height = Some(h);
     params.pixel_format = Some(PixelFormat::Yuv420P);
     params.tag = Some(CodecTag::fourcc(fc.as_bytes()));
-    params.extradata = Extradata::ffmpeg_for(fc, slices)
+    params.extradata = Extradata::canonical_extradata_for(fc, slices)
         .expect("valid slice count")
         .to_bytes()
         .to_vec();
@@ -113,7 +113,7 @@ fn encoded_frame(fc: Fourcc, w: u32, h: u32, slices: usize, pred: Predictor) -> 
 }
 
 fn cfg(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {
-    let extradata = Extradata::ffmpeg_for(fc, slices).expect("valid slice count");
+    let extradata = Extradata::canonical_extradata_for(fc, slices).expect("valid slice count");
     StreamConfig::new(fc, w, h, extradata).expect("dims OK")
 }
 

@@ -56,7 +56,7 @@ predictor.
   Explicit `*_serial` / `*_parallel` entry points are available for
   latency-sensitive or threadpool-controlled callers.
 - [`Fourcc`] / [`Extradata`] / [`StreamConfig`] / [`Predictor`] — the
-  identification surface. `Extradata::ffmpeg_for(fourcc, num_slices)`
+  identification surface. `Extradata::canonical_extradata_for(fourcc, num_slices)`
   builds the canonical 16-byte extradata block for the named FourCC.
 - [`inspect`] — a decode-free byte-walk (`peek_frame` /
   `peek_frame_info`) returning a typed `FrameLayout` of per-plane

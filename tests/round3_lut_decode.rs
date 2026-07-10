@@ -9,8 +9,8 @@
 //!
 //! The suite is decoder-driven: the encoder synthesises the wire
 //! bytes, the decoder reconstructs the plane, and the round-trip
-//! must be byte-exact. Per the round-1 doctrine, FFmpeg byte-equality
-//! is not in scope (no FFmpeg-encoded fixture corpus is in `tables/`).
+//! must be byte-exact. Per the round-1 doctrine, de-facto-encoder byte-equality
+//! is not in scope (no reference fixture corpus is in `tables/`).
 
 #![cfg(test)]
 

@@ -114,7 +114,7 @@ fn all_predictors() -> [Predictor; 4] {
 }
 
 fn stream_config(fc: Fourcc, width: u32, height: u32, num_slices: usize) -> StreamConfig {
-    let extradata = Extradata::ffmpeg_for(fc, num_slices).unwrap();
+    let extradata = Extradata::canonical_extradata_for(fc, num_slices).unwrap();
     StreamConfig::new(fc, width, height, extradata).unwrap()
 }
 

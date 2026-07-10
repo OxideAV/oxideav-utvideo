@@ -63,7 +63,7 @@ fn build_params_with_tag(fourcc: Fourcc, w: u32, h: u32, slices: usize) -> Codec
     p.tag = Some(CodecTag::fourcc(fourcc.as_bytes()));
     p.width = Some(w);
     p.height = Some(h);
-    p.extradata = Extradata::ffmpeg_for(fourcc, slices)
+    p.extradata = Extradata::canonical_extradata_for(fourcc, slices)
         .unwrap()
         .to_bytes()
         .to_vec();
@@ -189,8 +189,10 @@ fn factory_via_pixel_format_yuv_trio() {
             .expect("factory must derive FourCC from pixel format");
         let op = enc.output_params();
         assert_eq!(op.tag, Some(CodecTag::fourcc(expected.as_bytes())));
-        // Synthesised extradata from `Extradata::ffmpeg_for(fc, 1)`.
-        let expected_ext = Extradata::ffmpeg_for(expected, 1).unwrap().to_bytes();
+        // Synthesised extradata from `Extradata::canonical_extradata_for(fc, 1)`.
+        let expected_ext = Extradata::canonical_extradata_for(expected, 1)
+            .unwrap()
+            .to_bytes();
         assert_eq!(op.extradata, expected_ext.to_vec());
     }
 }
@@ -214,7 +216,7 @@ fn factory_tag_wins_over_pixel_format() {
 
 #[test]
 fn factory_preserves_caller_extradata() {
-    // Slices = 4 via populated extradata; ffmpeg_for(fc, 4) writes
+    // Slices = 4 via populated extradata; canonical_extradata_for(fc, 4) writes
     // (flags >> 24) = 3 ⇒ num_slices == 4 (`spec/01` §4.4.3).
     let mut reg = CodecRegistry::new();
     oxideav_utvideo::registry::register_codecs(&mut reg);
@@ -408,7 +410,7 @@ fn factory_missing_dims_rejected() {
     let mut p = CodecParameters::video(id.clone());
     p.tag = Some(CodecTag::fourcc(b"ULY4"));
     // no width/height
-    p.extradata = Extradata::ffmpeg_for(Fourcc::Uly4, 1)
+    p.extradata = Extradata::canonical_extradata_for(Fourcc::Uly4, 1)
         .unwrap()
         .to_bytes()
         .to_vec();
@@ -647,7 +649,7 @@ fn round_trip_via_pixel_format_derivation_yuv_trio() {
             expected_fc,
             w,
             h,
-            Extradata::ffmpeg_for(expected_fc, 1).unwrap(),
+            Extradata::canonical_extradata_for(expected_fc, 1).unwrap(),
         )
         .unwrap();
         let out = direct_decode(&cfg, &pkt.data).unwrap();
@@ -676,7 +678,13 @@ fn round_trip_multi_slice_parallel_path() {
     let input = build_video_frame(fc, w, h, 0xcafe_b0ba);
     enc.send_frame(&Frame::Video(input.clone())).unwrap();
     let pkt = enc.receive_packet().unwrap();
-    let cfg = StreamConfig::new(fc, w, h, Extradata::ffmpeg_for(fc, slices).unwrap()).unwrap();
+    let cfg = StreamConfig::new(
+        fc,
+        w,
+        h,
+        Extradata::canonical_extradata_for(fc, slices).unwrap(),
+    )
+    .unwrap();
     let out = direct_decode(&cfg, &pkt.data).unwrap();
     for (idx, (a, b)) in input.planes.iter().zip(out.planes.iter()).enumerate() {
         assert_eq!(a.data, b.samples, "plane {idx}");

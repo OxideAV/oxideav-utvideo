@@ -76,7 +76,7 @@ fn build_plane(width: u32, height: u32, plane: usize, seed: u32) -> Vec<u8> {
 }
 
 fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {
-    let extradata = Extradata::ffmpeg_for(fc, slices).unwrap();
+    let extradata = Extradata::canonical_extradata_for(fc, slices).unwrap();
     StreamConfig::new(fc, w, h, extradata).unwrap()
 }
 

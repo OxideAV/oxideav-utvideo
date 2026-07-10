@@ -343,7 +343,7 @@ fn inspector_layout_agrees_with_reference_decode() {
     }
 }
 
-/// Cross-check the crate's [`Extradata::ffmpeg_for`] builder against the
+/// Cross-check the crate's [`Extradata::canonical_extradata_for`] builder against the
 /// *actual wire extradata* of every reference stream: for each fixture,
 /// the 16 bytes our builder produces for `(fourcc, num_slices)` must be
 /// byte-identical to the extradata the reference encoder wrote
@@ -357,7 +357,7 @@ fn inspector_layout_agrees_with_reference_decode() {
 fn extradata_builder_matches_reference_wire_bytes() {
     for fx in CORPUS {
         let fourcc = Fourcc::from_bytes(*fx.fourcc).unwrap();
-        let built = Extradata::ffmpeg_for(fourcc, fx.num_slices).unwrap();
+        let built = Extradata::canonical_extradata_for(fourcc, fx.num_slices).unwrap();
         assert_eq!(
             &built.to_bytes()[..],
             fx.extradata,
@@ -653,7 +653,7 @@ fn fuzz_seed_corpus_reaches_deep_decode() {
             // The payload must be the fixture chunk verbatim and decode
             // to the reference pixels under the mapped config.
             assert_eq!(payload, fx.chunk, "{target}/{}: seed payload", fx.name);
-            let ed = Extradata::ffmpeg_for(sel_fourcc, num_slices).unwrap();
+            let ed = Extradata::canonical_extradata_for(sel_fourcc, num_slices).unwrap();
             let cfg = StreamConfig::new(sel_fourcc, width, height, ed).unwrap();
             let decoded = decode_frame(&cfg, payload)
                 .unwrap_or_else(|e| panic!("{target}/{}: seed decode failed: {e}", fx.name));

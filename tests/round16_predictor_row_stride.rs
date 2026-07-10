@@ -34,7 +34,7 @@ use oxideav_utvideo::{
 };
 
 fn cfg_for(fc: Fourcc, w: u32, h: u32, num_slices: usize) -> StreamConfig {
-    let ed = Extradata::ffmpeg_for(fc, num_slices).unwrap();
+    let ed = Extradata::canonical_extradata_for(fc, num_slices).unwrap();
     StreamConfig::new(fc, w, h, ed).unwrap()
 }
 

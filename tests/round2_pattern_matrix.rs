@@ -5,14 +5,14 @@
 //! combination on a single deterministic LCG-noise pattern plus a few
 //! corner cases. The Auditor Round 1 ([`docs/video/utvideo/audit/`]
 //! `01-validation-report.md` §3.1) characterises a 1018-cell test
-//! matrix that the Python cleanroom passes 100% against the FFmpeg
+//! matrix that the Python cleanroom passes 100% against the reference
 //! oracle. Round 2 mirrors that matrix into Rust as a self-roundtrip
 //! suite — the same encoder bytes go through the same decoder, but
 //! across the wider corpus the audit found load-bearing.
 //!
 //! Self-roundtrip is the strongest test we can run **without** a
-//! committed FFmpeg fixture corpus (none has been promoted to
-//! `docs/video/utvideo/tables/` yet); FFmpeg byte-equality remains a
+//! committed reference fixture corpus (none has been promoted to
+//! `docs/video/utvideo/tables/` yet); de-facto-encoder byte-equality remains a
 //! deferred round candidate per [`CHANGELOG.md`] "Round 1 — notes" and
 //! the audit §8 open items.
 //!
