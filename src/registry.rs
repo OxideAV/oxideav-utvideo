@@ -1,22 +1,34 @@
 //! `oxideav-core` framework integration: codec registration plus the
 //! [`oxideav_core::Decoder`] and [`oxideav_core::Encoder`]
-//! implementations wrapping the crate's `decode_frame` /
-//! `encode_frame`.
+//! implementations wrapping the crate's `decode_frame_with_workers` /
+//! `encode_frame_with_workers`.
 //!
 //! Compiled only when the default-on `registry` Cargo feature is
 //! enabled. Standalone consumers (`default-features = false`) skip
 //! this module entirely.
+//!
+//! ## Threading contract (round 420)
+//!
+//! Both trait impls override `set_execution_context` and store the
+//! [`ExecutionContext::threads`] budget. The trait path is **serial by
+//! default**: until the executor grants a budget, decode and encode
+//! run single-threaded, and the slice-parallel fan-out (bounded by
+//! `threads.min(num_slices).max(1)`) engages only for multi-slice
+//! frames past the 64 Ki-pixel threshold under a `threads > 1` budget.
+//! Output is byte-identical for every budget (per-slice independence,
+//! `spec/02` §5 + `spec/04` §§3.1, 4, 5, 7); the budget affects only
+//! wall-clock time.
 
 #![cfg(feature = "registry")]
 
 use oxideav_core::{
     CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry, CodecTag, Decoder,
-    Encoder, Error as CoreError, Frame, Packet, PixelFormat, Result as CoreResult, RuntimeContext,
-    TimeBase, VideoFrame, VideoPlane,
+    Encoder, Error as CoreError, ExecutionContext, Frame, Packet, PixelFormat,
+    Result as CoreResult, RuntimeContext, TimeBase, VideoFrame, VideoPlane,
 };
 
-use crate::decoder::{decode_frame, DecodedFrame};
-use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use crate::decoder::{decode_frame_with_workers, DecodedFrame};
+use crate::encoder::{encode_frame_with_workers, EncodedFrame, PlaneInput};
 use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 use crate::predict;
 
@@ -83,6 +95,9 @@ fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
         cfg,
         pending: None,
         eof: false,
+        // Threading contract: serial until the caller grants a budget
+        // via `set_execution_context`.
+        threads: 1,
     }))
 }
 
@@ -118,11 +133,23 @@ struct UtVideoDecoder {
     cfg: Option<StreamConfig>,
     pending: Option<Packet>,
     eof: bool,
+    /// Caller-granted thread budget (threading contract, round 420).
+    /// `1` — the serial default — until [`Decoder::set_execution_context`]
+    /// stores a bigger budget; every slice-parallel fan-out inside
+    /// `decode_frame_with_workers` is bounded by it (clamped to the
+    /// slice count). The host is never queried.
+    threads: usize,
 }
 
 impl Decoder for UtVideoDecoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
+    }
+
+    fn set_execution_context(&mut self, ctx: &ExecutionContext) {
+        // `ExecutionContext::threads` is documented `>= 1`; clamp
+        // defensively so a zero budget still means "serial".
+        self.threads = ctx.threads.max(1);
     }
 
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
@@ -147,7 +174,7 @@ impl Decoder for UtVideoDecoder {
             .cfg
             .as_ref()
             .ok_or_else(|| CoreError::invalid("oxideav-utvideo: stream config not configured"))?;
-        let frame = decode_frame(cfg, &pkt.data)
+        let frame = decode_frame_with_workers(cfg, &pkt.data, self.threads)
             .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?;
         Ok(Frame::Video(map_to_video_frame(frame, pkt.pts)))
     }
@@ -277,6 +304,9 @@ fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
         out_params,
         pending: None,
         eof: false,
+        // Threading contract: serial until the caller grants a budget
+        // via `set_execution_context`.
+        threads: 1,
     }))
 }
 
@@ -295,6 +325,12 @@ struct UtVideoEncoder {
     out_params: CodecParameters,
     pending: Option<Vec<u8>>,
     eof: bool,
+    /// Caller-granted thread budget (threading contract, round 420).
+    /// `1` — the serial default — until [`Encoder::set_execution_context`]
+    /// stores a bigger budget; every slice-parallel fan-out inside
+    /// `encode_frame_with_workers` is bounded by it (clamped to the
+    /// slice count). The host is never queried.
+    threads: usize,
 }
 
 impl UtVideoEncoder {
@@ -326,6 +362,12 @@ impl Encoder for UtVideoEncoder {
 
     fn output_params(&self) -> &CodecParameters {
         &self.out_params
+    }
+
+    fn set_execution_context(&mut self, ctx: &ExecutionContext) {
+        // `ExecutionContext::threads` is documented `>= 1`; clamp
+        // defensively so a zero budget still means "serial".
+        self.threads = ctx.threads.max(1);
     }
 
     fn send_frame(&mut self, frame: &Frame) -> CoreResult<()> {
@@ -423,8 +465,8 @@ impl Encoder for UtVideoEncoder {
             num_slices: self.cfg.num_slices(),
             planes,
         };
-        let bytes =
-            encode_frame(&efr).map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?;
+        let bytes = encode_frame_with_workers(&efr, self.threads)
+            .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?;
         self.pending = Some(bytes);
         Ok(())
     }
@@ -486,6 +528,7 @@ mod tests {
             out_params,
             pending: None,
             eof: false,
+            threads: 1,
         }
     }
 
@@ -567,6 +610,53 @@ mod tests {
         let _ = enc;
         let cfg = build_encoder_config(&p).unwrap();
         assert_eq!(cfg.fourcc, Fourcc::Uly0);
+    }
+
+    #[test]
+    fn decoder_execution_context_budget_is_stored_and_clamped() {
+        // Threading contract: the decoder starts serial (threads == 1)
+        // and `set_execution_context` stores the caller-granted budget,
+        // clamping a (contract-violating) zero up to 1.
+        let mut p = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        p.width = Some(16);
+        p.height = Some(16);
+        p.tag = Some(CodecTag::fourcc(Fourcc::Uly0.as_bytes()));
+        p.extradata = Extradata::canonical_extradata_for(Fourcc::Uly0, 1)
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        let mut dec = UtVideoDecoder {
+            codec_id: CodecId::new(CODEC_ID_STR),
+            cfg: build_stream_config(&p).unwrap(),
+            pending: None,
+            eof: false,
+            threads: 1,
+        };
+        assert_eq!(dec.threads, 1, "contract default is serial");
+
+        Decoder::set_execution_context(&mut dec, &ExecutionContext::with_threads(6));
+        assert_eq!(dec.threads, 6);
+
+        Decoder::set_execution_context(&mut dec, &ExecutionContext::serial());
+        assert_eq!(dec.threads, 1, "serial budget must be honoured");
+
+        Decoder::set_execution_context(&mut dec, &ExecutionContext { threads: 0 });
+        assert_eq!(dec.threads, 1, "zero budget clamps to serial");
+    }
+
+    #[test]
+    fn encoder_execution_context_budget_is_stored_and_clamped() {
+        let mut enc = build_direct_encoder(Fourcc::Uly0, 16, 16);
+        assert_eq!(enc.threads, 1, "contract default is serial");
+
+        Encoder::set_execution_context(&mut enc, &ExecutionContext::with_threads(4));
+        assert_eq!(enc.threads, 4);
+
+        Encoder::set_execution_context(&mut enc, &ExecutionContext::serial());
+        assert_eq!(enc.threads, 1, "serial budget must be honoured");
+
+        Encoder::set_execution_context(&mut enc, &ExecutionContext { threads: 0 });
+        assert_eq!(enc.threads, 1, "zero budget clamps to serial");
     }
 
     #[test]
