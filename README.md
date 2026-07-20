@@ -30,10 +30,43 @@ Median, spec §04, with the per-slice `+128` first-pixel seed), the
 per-plane canonical-Huffman codebooks (spec §05), per-slice
 partitioning (spec §02), and RGB inter-plane decorrelation (spec §04
 §6) are implemented. Both decode and encode have a slice-parallel path
-that auto-dispatches multi-slice frames above a pixel-count threshold.
+gated on a caller-granted worker budget (see **Threading** below).
 The trait-path encoder picks a predictor per frame with a
 content-adaptive entropy heuristic; the direct API takes an explicit
 predictor.
+
+## Threading
+
+**Serial by default — parallelism is opt-in (round 420, execution
+context contract).** The crate never queries host parallelism; every
+internal `std::thread::scope` fan-out is bounded by a caller-granted
+worker budget clamped to the slice count
+(`workers.min(num_slices).max(1)`).
+
+- **Registry / trait path:** the `Decoder` and `Encoder` impls
+  override `set_execution_context` and store the
+  `oxideav_core::ExecutionContext::threads` budget. With no call the
+  trait path runs single-threaded — the contract default. Grant
+  `threads > 1` to enable the slice-parallel path for multi-slice
+  frames above the 64 Ki-pixel threshold.
+- **Direct API:** `decode_frame` / `encode_frame` are serial;
+  `decode_frame_with_workers` / `encode_frame_with_workers` take an
+  explicit budget with the same threshold gate; the forced
+  `*_parallel` entry points take the budget with no threshold gate.
+
+The budget is a pure scheduling input: output is **byte-identical for
+every budget** (pinned across the whole 19-fixture reference corpus at
+budgets 1/2/8, on both the direct and trait surfaces, by
+`tests/round420_execution_invariance.rs`). The `thread_scaling` bench
+keeps the win measured — on a 16-core host at 1280×720 ULY4 with 8
+slices: decode ≈5.8× at 4 workers (≈6.8× at max), encode ≈3.5× at 4
+workers (Amdahl-bounded by the single-threaded per-plane Huffman
+build).
+
+**Behaviour change:** before round 420, `decode_frame` /
+`encode_frame` silently fanned out across host threads for large
+multi-slice frames. If you relied on that, pass a budget explicitly or
+grant one through `set_execution_context`.
 
 ### Not yet supported
 
@@ -47,14 +80,17 @@ predictor.
 ## Public API
 
 - [`decode_frame`] — decode one `00dc` chunk payload into per-plane
-  samples (`DecodedFrame`). [`decode_frame_strict`] is an opt-in
+  samples (`DecodedFrame`), single-threaded.
+  [`decode_frame_with_workers`] adds a caller-granted worker budget
+  for the slice-parallel path. [`decode_frame_strict`] is an opt-in
   conformance variant: byte-identical output for any well-formed
   stream, but it additionally verifies each slice's trailing
   word-boundary padding is zero (spec §05 §4.3 / §8) and rejects a
   non-zero padding bit with a located `Error::NonZeroPadding`.
-- [`encode_frame`] — encode per-plane samples into one chunk payload.
-  Explicit `*_serial` / `*_parallel` entry points are available for
-  latency-sensitive or threadpool-controlled callers.
+- [`encode_frame`] — encode per-plane samples into one chunk payload,
+  single-threaded. [`encode_frame_with_workers`] adds the worker
+  budget. Explicit `*_serial` / `*_parallel(workers)` entry points are
+  available for latency-sensitive or threadpool-controlled callers.
 - [`Fourcc`] / [`Extradata`] / [`StreamConfig`] / [`Predictor`] — the
   identification surface. `Extradata::canonical_extradata_for(fourcc, num_slices)`
   builds the canonical 16-byte extradata block for the named FourCC.
@@ -84,10 +120,13 @@ predictor.
 
 The crate ships per-stage unit tests, a self-roundtrip matrix across
 every FourCC × predictor × slice-count combination, a cross-surface
-decode-agreement harness that asserts the four decode entry points
-(auto-dispatch / forced-serial / forced-parallel / strict) reproduce
-byte-identical frames on every self-encoded stream and never diverge or
-panic on arbitrary bytes, a
+decode-agreement harness that asserts the five decode entry points
+(serial default / budgeted / forced-serial / forced-parallel / strict)
+reproduce byte-identical frames on every self-encoded stream and never
+diverge or panic on arbitrary bytes, an execution-budget invariance
+suite (`round420`) pinning byte-identical decode and encode output
+across worker budgets 1/2/8 on the full reference corpus through both
+the direct and registry trait surfaces, a
 **reference-stream golden corpus** (`tests/fixtures/reference/`: 19
 pre-extracted frame bodies + wire extradata + reference-decoder pixel
 ground-truth, decoded byte-exact and cross-checked through the strict,

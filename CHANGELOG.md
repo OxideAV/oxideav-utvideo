@@ -6,6 +6,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — BREAKING: threading is now opt-in (execution-context contract)
+
+- **`decode_frame` and `encode_frame` are now strictly single-threaded.**
+  The crate adopts the framework threading contract: a codec runs
+  serial until the caller grants a thread budget, and no code path
+  queries `std::thread::available_parallelism()` anymore. Previously
+  both entry points silently fanned out across host threads for
+  multi-slice frames above the 64 Ki-pixel threshold — out of contract,
+  because they threaded even when the caller wanted serial execution.
+  Decoded planes / encoded bytes are unchanged; only the scheduling
+  behaviour moved. Callers that want the slice-parallel speedup back
+  choose one of:
+  - **Registry / trait path:** call `set_execution_context` (now
+    overridden on both the `Decoder` and `Encoder` impls) with an
+    `oxideav_core::ExecutionContext` carrying `threads > 1`. With no
+    call, the trait path is serial — the contract default.
+  - **Direct API:** the new `decode_frame_with_workers` /
+    `encode_frame_with_workers` entry points take an explicit worker
+    budget and keep the 64 Ki-pixel threshold gate.
+  Every internal `std::thread::scope` fan-out is bounded by
+  `workers.min(num_slices).max(1)`; output is byte-identical for every
+  budget (pinned across the whole 19-fixture reference corpus at
+  budgets 1/2/8 by `tests/round420_execution_invariance.rs`).
+- **BREAKING: `decode_frame_parallel` / `encode_frame_parallel` take a
+  `workers: usize` budget parameter.** The forced-parallel entry points
+  previously sized their pool from host parallelism; the budget is now
+  the caller's explicit decision (a value of 0/1 degenerates to the
+  serial walk). The new `thread_scaling` bench keeps the parallel win
+  measured per budget (1/2/4/host-max) on both decode and encode.
+
 ### Fixed
 
 - **Single-symbol plane carrying slice data is now rejected
