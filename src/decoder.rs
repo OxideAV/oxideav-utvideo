@@ -17,17 +17,23 @@
 //! buffer) — this is consistent with `oxideav-magicyuv`'s decoded
 //! plane API and keeps the codec free of pixel-packing policy.
 //!
-//! ## Slice-level parallelism (round 4)
+//! ## Slice-level parallelism (round 4; budget contract round 420)
 //!
 //! Per `spec/02` §7 "Implementation notes": *"Parallel per-slice
 //! decoding is therefore achievable: a multi-threaded decoder reads
 //! the offset table once per plane, then dispatches the slice-data
-//! byte ranges to per-thread decoders."* The decoder now does exactly
-//! that for frames whose pixel count crosses
-//! [`PARALLEL_PIXEL_THRESHOLD`] and whose slice count is `> 1`. Each
-//! plane's Huffman table is built once, then the slices' Huffman
-//! decodes + inverse-predicts run on a `std::thread::scope`
-//! thread-pool sized at `min(num_slices, available_parallelism())`.
+//! byte ranges to per-thread decoders."* The decoder does exactly
+//! that — but only when the **caller grants a thread budget**. This
+//! module never queries host parallelism; the number of workers is an
+//! explicit parameter on every parallel entry point, and every
+//! `std::thread::scope` fan-out is bounded by
+//! `workers.min(num_slices).max(1)`. With no budget (or budget 1) the
+//! decode is strictly single-threaded. [`decode_frame_with_workers`]
+//! additionally gates the fan-out on [`PARALLEL_PIXEL_THRESHOLD`] so
+//! small frames skip the thread-spawn cost. Framework callers grant
+//! the budget through `oxideav-core`'s `ExecutionContext` /
+//! `set_execution_context` hook (see `crate::registry`); the trait
+//! path is serial until that hook is called.
 //!
 //! Slices are fully independent for both stages: every slice's
 //! Huffman bit-stream is self-contained (`spec/02` §5) and every
@@ -113,35 +119,62 @@ pub struct DecodedFrame {
 /// Decode one Ut Video frame given its `00dc` chunk payload bytes
 /// and a parsed [`StreamConfig`].
 ///
-/// Picks the serial or [`PARALLEL_PIXEL_THRESHOLD`]-gated parallel
-/// path automatically. Callers that want explicit control can use
-/// [`decode_frame_serial`] / [`decode_frame_parallel`] directly.
+/// **Serial.** Since round 420 this entry runs single-threaded — the
+/// threading contract makes one worker the default, and internal
+/// fan-out happens only when the caller grants an explicit budget.
+/// Callers that want slice-parallel decode pass a worker budget to
+/// [`decode_frame_with_workers`] (threshold-gated) or
+/// [`decode_frame_parallel`] (forced fan-out).
 pub fn decode_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedFrame> {
+    decode_frame_serial(cfg, chunk_payload)
+}
+
+/// Budgeted decode: dispatches the slice-parallel path when the
+/// caller-granted `workers` budget exceeds 1, the frame has more than
+/// one slice, **and** the pixel count crosses
+/// [`PARALLEL_PIXEL_THRESHOLD`] (below it the thread-spawn + join cost
+/// typically dominates the per-slice work). Otherwise decodes
+/// serially. Output is byte-identical for every budget.
+///
+/// The fan-out never exceeds `workers.min(num_slices).max(1)` threads
+/// and the host is never queried — deriving a budget from the machine
+/// (e.g. via `std::thread::available_parallelism`) is the caller's
+/// decision.
+pub fn decode_frame_with_workers(
+    cfg: &StreamConfig,
+    chunk_payload: &[u8],
+    workers: usize,
+) -> Result<DecodedFrame> {
     let total = (cfg.width as usize) * (cfg.height as usize);
-    if cfg.num_slices() > 1 && total >= PARALLEL_PIXEL_THRESHOLD {
-        decode_frame_parallel(cfg, chunk_payload)
+    if workers > 1 && cfg.num_slices() > 1 && total >= PARALLEL_PIXEL_THRESHOLD {
+        decode_frame_parallel(cfg, chunk_payload, workers)
     } else {
         decode_frame_serial(cfg, chunk_payload)
     }
 }
 
 /// Serial-path decode: one slice after another, single-threaded.
-/// Always used for `num_slices == 1` or for frames smaller than
-/// [`PARALLEL_PIXEL_THRESHOLD`]. Exposed so callers can opt out of
-/// the thread-pool spin-up cost in latency-sensitive single-frame
-/// paths.
+/// Exposed so callers can opt out of the thread-pool spin-up cost in
+/// latency-sensitive single-frame paths.
 pub fn decode_frame_serial(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedFrame> {
     let parsed = parse_payload(cfg, chunk_payload)?;
-    finish_decode(cfg, parsed, /*parallel=*/ false)
+    finish_decode(cfg, parsed, /*workers=*/ 1)
 }
 
 /// Parallel-path decode: per-slice decode + inverse-predict run on
-/// `std::thread::scope`. Each slice is independent (per-slice +128
-/// seed; self-contained Huffman bit-stream), so the join produces a
-/// bit-exact equivalent of the serial output.
-pub fn decode_frame_parallel(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<DecodedFrame> {
+/// `std::thread::scope`, fanned out across at most
+/// `workers.min(num_slices).max(1)` threads regardless of frame size
+/// (no [`PARALLEL_PIXEL_THRESHOLD`] gate). Each slice is independent
+/// (per-slice +128 seed; self-contained Huffman bit-stream), so the
+/// join produces a bit-exact equivalent of the serial output. A
+/// `workers` budget of 0 or 1 degenerates to the serial walk.
+pub fn decode_frame_parallel(
+    cfg: &StreamConfig,
+    chunk_payload: &[u8],
+    workers: usize,
+) -> Result<DecodedFrame> {
     let parsed = parse_payload(cfg, chunk_payload)?;
-    finish_decode(cfg, parsed, /*parallel=*/ true)
+    finish_decode(cfg, parsed, workers)
 }
 
 /// Strict-conformance decode: identical output to [`decode_frame`] for
@@ -312,7 +345,7 @@ fn parse_payload<'a>(cfg: &StreamConfig, chunk_payload: &'a [u8]) -> Result<Pars
 fn finish_decode(
     cfg: &StreamConfig,
     parsed: ParsedFrame<'_>,
-    parallel: bool,
+    workers: usize,
 ) -> Result<DecodedFrame> {
     let num_slices = cfg.num_slices();
     let predictor = Predictor::from_frame_info(parsed.frame_info);
@@ -323,7 +356,7 @@ fn finish_decode(
         let ph = plane.height;
         let mut samples = vec![0u8; pw * ph];
 
-        if parallel && num_slices > 1 {
+        if workers > 1 && num_slices > 1 {
             decode_plane_parallel(
                 &plane.table,
                 &plane.slice_bytes,
@@ -331,6 +364,7 @@ fn finish_decode(
                 pw,
                 ph,
                 predictor,
+                workers,
                 &mut samples,
             )?;
         } else {
@@ -488,6 +522,7 @@ fn decode_plane_serial_strict(
 /// row-wise (`split_at_mut`) so every thread owns a disjoint
 /// `slice_rows * pw` mutable strip. Errors propagate via the join
 /// — the first failing slice wins.
+#[allow(clippy::too_many_arguments)]
 fn decode_plane_parallel(
     table: &HuffmanTable,
     slice_bytes: &[&[u8]],
@@ -495,6 +530,7 @@ fn decode_plane_parallel(
     pw: usize,
     ph: usize,
     predictor: Predictor,
+    workers: usize,
     out: &mut [u8],
 ) -> Result<()> {
     debug_assert_eq!(slice_bytes.len(), num_slices);
@@ -521,14 +557,11 @@ fn decode_plane_parallel(
     }
     debug_assert!(remaining.is_empty());
 
-    // Bound the thread fanout. `available_parallelism` is the official
-    // way to do this in std without a thread-pool crate; we cap at
-    // `num_slices` because more threads than tasks is pointless.
-    let par = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(num_slices)
-        .max(1);
+    // Bound the thread fanout by the caller-granted budget, clamped to
+    // the work-unit count (more threads than slices is pointless) and
+    // never below 1. The host is deliberately NOT queried here — the
+    // threading contract makes the budget the caller's decision.
+    let par = workers.min(num_slices).max(1);
 
     // Use std::thread::scope so non-'static borrows of `slice_bytes` +
     // `table` are sound. Errors are collected by index then merged.

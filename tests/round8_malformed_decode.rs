@@ -35,7 +35,8 @@
 #![cfg(test)]
 
 use oxideav_utvideo::decoder::{
-    decode_frame, decode_frame_parallel, decode_frame_serial, PARALLEL_PIXEL_THRESHOLD,
+    decode_frame, decode_frame_parallel, decode_frame_serial, decode_frame_with_workers,
+    PARALLEL_PIXEL_THRESHOLD,
 };
 use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
 use oxideav_utvideo::error::Error;
@@ -360,8 +361,8 @@ fn single_byte_flip_never_panics_or_mis_typed() {
 /// specific variant and across both the serial and parallel paths.
 #[test]
 fn truncated_slice_data_span_serial_and_parallel() {
-    // Large enough that decode_frame auto-selects the parallel path
-    // (320×240 = 76 800 px > PARALLEL_PIXEL_THRESHOLD), 4 slices.
+    // Large enough that a multi-worker budget selects the parallel
+    // path (320×240 = 76 800 px > PARALLEL_PIXEL_THRESHOLD), 4 slices.
     const _: () = assert!(320 * 240 > PARALLEL_PIXEL_THRESHOLD);
     let y = noise_plane(0xdead, 320 * 240);
     let u = noise_plane(0xbeef, 160 * 120);
@@ -373,11 +374,12 @@ fn truncated_slice_data_span_serial_and_parallel() {
     // last plane now exceeds the present bytes → ChunkTooShort.
     let mut short = bytes.clone();
     short.truncate(short.len() - 8);
-    for label in ["auto", "serial", "parallel"] {
+    for label in ["default", "serial", "budgeted", "parallel"] {
         let res = match label {
-            "auto" => decode_frame(&cfg, &short),
+            "default" => decode_frame(&cfg, &short),
             "serial" => decode_frame_serial(&cfg, &short),
-            _ => decode_frame_parallel(&cfg, &short),
+            "budgeted" => decode_frame_with_workers(&cfg, &short, 4),
+            _ => decode_frame_parallel(&cfg, &short, 4),
         };
         assert!(
             matches!(res, Err(Error::ChunkTooShort { .. })),

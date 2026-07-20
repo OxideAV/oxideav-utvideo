@@ -3,14 +3,18 @@
 //! is independent (`spec/04` §§3.1, 4, 5, 7) and every slice's Huffman
 //! bit-stream is a self-contained byte blob (`spec/02` §5), so the
 //! per-plane forward-predict and per-slice bit-pack steps fan out
-//! across `std::thread::scope`. The suite verifies four properties:
+//! across `std::thread::scope`, bounded by the caller-granted worker
+//! budget clamped to the slice count (round 420: the crate never
+//! queries host parallelism itself). The suite verifies four
+//! properties:
 //!
 //! 1. **Byte-exact equivalence.** For every fixture the parallel
-//!    encoder produces output identical to the serial encoder. This
-//!    is the strict correctness wall.
-//! 2. **`encode_frame` auto-dispatch.** The threshold-gated entry
-//!    matches the explicit serial path on small frames and the
-//!    explicit parallel path on large frames.
+//!    encoder produces output identical to the serial encoder, across
+//!    worker budgets. This is the strict correctness wall.
+//! 2. **`encode_frame_with_workers` dispatch.** The threshold-gated
+//!    budgeted entry matches the explicit serial path on small frames
+//!    and the explicit parallel path on large frames, and the serial
+//!    `encode_frame` default always matches both.
 //! 3. **Self-roundtrip through the parallel encoder.** Frames encoded
 //!    through the parallel path decode back to identical samples
 //!    (serial + parallel decoder paths both).
@@ -22,8 +26,8 @@
 
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
 use oxideav_utvideo::encoder::{
-    encode_frame, encode_frame_parallel, encode_frame_serial, EncodedFrame, PlaneInput,
-    PARALLEL_PIXEL_THRESHOLD,
+    encode_frame, encode_frame_parallel, encode_frame_serial, encode_frame_with_workers,
+    EncodedFrame, PlaneInput, PARALLEL_PIXEL_THRESHOLD,
 };
 use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 
@@ -102,12 +106,17 @@ fn parallel_matches_serial_uly0_matrix() {
                     let v = noise_plane(0x300 ^ h as u64, (w / 2 * h / 2) as usize);
                     let frame = frame_for(Fourcc::Uly0, &[y, u, v], w, h, pred, slices);
                     let serial = encode_frame_serial(&frame).unwrap();
-                    let parallel = encode_frame_parallel(&frame).unwrap();
-                    assert_eq!(
-                        serial, parallel,
-                        "byte drift at {}x{} slices={} pred={:?}",
-                        w, h, slices, pred
-                    );
+                    // Cover budgets below, equal to, and above the
+                    // slice count — the fan-out clamp must keep every
+                    // one byte-exact.
+                    for workers in [2usize, 4, 8] {
+                        let parallel = encode_frame_parallel(&frame, workers).unwrap();
+                        assert_eq!(
+                            serial, parallel,
+                            "byte drift at {}x{} slices={} pred={:?} workers={}",
+                            w, h, slices, pred, workers
+                        );
+                    }
                     cases += 1;
                 }
             }
@@ -135,20 +144,21 @@ fn parallel_matches_serial_rgb_family() {
         for pred in [Predictor::Left, Predictor::Median, Predictor::Gradient] {
             let frame = frame_for(fc, &planes, 256, 192, pred, 4);
             let serial = encode_frame_serial(&frame).unwrap();
-            let parallel = encode_frame_parallel(&frame).unwrap();
+            let parallel = encode_frame_parallel(&frame, 4).unwrap();
             assert_eq!(serial, parallel, "RGB byte drift for {fc:?}/{pred:?}");
         }
     }
 }
 
-/// `encode_frame` (the auto-dispatch entry) should pick the parallel
-/// path for large multi-slice frames and the serial path for small
-/// ones; in both cases the output must be byte-identical to the
-/// explicit-path call.
+/// `encode_frame_with_workers` (the budgeted threshold-gated entry)
+/// should pick the parallel path for large multi-slice frames under a
+/// multi-worker budget and the serial path for small ones; in every
+/// case the output must be byte-identical to the explicit-path calls,
+/// and the serial `encode_frame` default must match too.
 #[test]
-fn auto_dispatch_matches_both_paths() {
-    // Small frame: 16×16 = 256 px, well under the threshold. Auto
-    // picks serial.
+fn budgeted_dispatch_matches_both_paths() {
+    // Small frame: 16×16 = 256 px, well under the threshold. Dispatch
+    // picks serial even with budget.
     let small = noise_plane(0x1, 16 * 16);
     let frame = frame_for(
         Fourcc::Uly4,
@@ -158,11 +168,13 @@ fn auto_dispatch_matches_both_paths() {
         Predictor::Median,
         4,
     );
-    let auto = encode_frame(&frame).unwrap();
+    let budgeted = encode_frame_with_workers(&frame, 8).unwrap();
+    let default = encode_frame(&frame).unwrap();
     let serial = encode_frame_serial(&frame).unwrap();
-    let parallel = encode_frame_parallel(&frame).unwrap();
-    assert_eq!(auto, serial);
-    assert_eq!(auto, parallel);
+    let parallel = encode_frame_parallel(&frame, 8).unwrap();
+    assert_eq!(budgeted, serial);
+    assert_eq!(budgeted, parallel);
+    assert_eq!(default, serial);
 
     // Large frame: 320×240 = 76 800 px, above PARALLEL_PIXEL_THRESHOLD.
     const _: () = assert!(320 * 240 > PARALLEL_PIXEL_THRESHOLD);
@@ -177,11 +189,15 @@ fn auto_dispatch_matches_both_paths() {
         Predictor::Gradient,
         8,
     );
-    let auto = encode_frame(&frame2).unwrap();
+    let budgeted = encode_frame_with_workers(&frame2, 8).unwrap();
+    let serial_budget = encode_frame_with_workers(&frame2, 1).unwrap();
+    let default = encode_frame(&frame2).unwrap();
     let serial = encode_frame_serial(&frame2).unwrap();
-    let parallel = encode_frame_parallel(&frame2).unwrap();
-    assert_eq!(auto, serial);
-    assert_eq!(auto, parallel);
+    let parallel = encode_frame_parallel(&frame2, 8).unwrap();
+    assert_eq!(budgeted, serial);
+    assert_eq!(budgeted, parallel);
+    assert_eq!(serial_budget, serial);
+    assert_eq!(default, serial, "encode_frame must be serial");
 }
 
 /// 1-slice frames bypass the parallel fan-out regardless of size;
@@ -194,15 +210,17 @@ fn single_slice_byte_equiv() {
     let v = noise_plane(0x3456_789a, 160 * 120);
     let frame = frame_for(Fourcc::Uly0, &[y, u, v], 320, 240, Predictor::Left, 1);
     let auto = encode_frame(&frame).unwrap();
+    let budgeted = encode_frame_with_workers(&frame, 8).unwrap();
     let serial = encode_frame_serial(&frame).unwrap();
-    let parallel = encode_frame_parallel(&frame).unwrap();
+    let parallel = encode_frame_parallel(&frame, 8).unwrap();
     assert_eq!(auto, serial);
     assert_eq!(auto, parallel);
+    assert_eq!(auto, budgeted);
 }
 
 /// Stress: 256 slices on a tall frame (each slice 1 row). The parallel
-/// encoder caps thread count at `available_parallelism()` so the
-/// fan-out buckets 256 slices into a handful of workers; the
+/// encoder clamps the fan-out at the caller-granted budget so the
+/// dispatch buckets 256 slices into a handful of workers; the
 /// per-bucket loop must still emit the correct slice order.
 #[test]
 fn many_slices_one_row_each() {
@@ -217,13 +235,19 @@ fn many_slices_one_row_each() {
         256,
     );
     let serial = encode_frame_serial(&frame).unwrap();
-    let parallel = encode_frame_parallel(&frame).unwrap();
-    assert_eq!(serial, parallel, "256-slice byte drift");
+    // 1024 pins the over-budget clamp: the fan-out must cap at the
+    // 256 work units, not at the raw budget.
+    for workers in [2usize, 3, 1024] {
+        let par = encode_frame_parallel(&frame, workers).unwrap();
+        assert_eq!(serial, par, "256-slice byte drift, workers={workers}");
+    }
+    let parallel = encode_frame_parallel(&frame, 8).unwrap();
+    assert_eq!(serial, parallel, "256-slice byte drift, workers=8");
 
     // And the result must round-trip through both decode paths.
     let c = cfg(Fourcc::Uly4, 64, 256, 256);
     let dec_s = decode_frame_serial(&c, &parallel).unwrap();
-    let dec_p = decode_frame_parallel(&c, &parallel).unwrap();
+    let dec_p = decode_frame_parallel(&c, &parallel, 8).unwrap();
     assert_eq!(dec_s.planes, dec_p.planes);
 }
 
@@ -244,10 +268,10 @@ fn parallel_encode_roundtrips_through_decoder() {
         Predictor::Median,
         8,
     );
-    let bytes = encode_frame_parallel(&frame).unwrap();
+    let bytes = encode_frame_parallel(&frame, 8).unwrap();
     let c = cfg(Fourcc::Uly0, 320, 240, 8);
     let dec_s = decode_frame_serial(&c, &bytes).unwrap();
-    let dec_p = decode_frame_parallel(&c, &bytes).unwrap();
+    let dec_p = decode_frame_parallel(&c, &bytes, 8).unwrap();
     assert_eq!(dec_s.planes, dec_p.planes);
     assert_eq!(dec_s.planes[0].samples, big_y);
     assert_eq!(dec_s.planes[1].samples, big_u);
@@ -271,14 +295,14 @@ fn perf_smoke_uly4_1280x720() {
 
     // Warm up the per-path caches once each so the timing isn't first-call dominated.
     let _ = encode_frame_serial(&frame).unwrap();
-    let _ = encode_frame_parallel(&frame).unwrap();
+    let _ = encode_frame_parallel(&frame, 4).unwrap();
 
     let t0 = Instant::now();
     let _ = encode_frame_serial(&frame).unwrap();
     let serial = t0.elapsed();
 
     let t0 = Instant::now();
-    let _ = encode_frame_parallel(&frame).unwrap();
+    let _ = encode_frame_parallel(&frame, 4).unwrap();
     let parallel = t0.elapsed();
 
     eprintln!(

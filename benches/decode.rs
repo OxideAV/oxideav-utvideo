@@ -13,7 +13,11 @@
 //!     planes vs. ULRG plus no RGB decorrelation pass.
 //!   - **decode_parallel_scaling**: `bench_with_input` over slice counts
 //!     `N ∈ {1, 2, 4, 8}` at 1280×720 ULY4 with the Gradient predictor;
-//!     shows the slice-parallel speedup table in criterion output.
+//!     shows the slice-parallel speedup table in criterion output. The
+//!     parallel entries grant a worker budget equal to the slice count
+//!     (round 420: the codec never derives a budget from the host —
+//!     worker-count scaling under a fixed slice count lives in the
+//!     `thread_scaling` bench).
 //!
 //! Run with:
 //!     cargo bench -p oxideav-utvideo --bench decode
@@ -139,16 +143,19 @@ fn bench_decode_parallel_scaling(c: &mut Criterion) {
                 b.iter(|| decode_frame_serial(cfg, criterion::black_box(frame)).expect("decode"));
             },
         );
-        // Parallel-path measurement. For `N == 1` the parallel path
-        // also runs single-threaded by construction (no fan-out
-        // possible); the entry is kept so the criterion output has
-        // a 1-slice baseline against the parallel dispatcher's
-        // fixed overhead.
+        // Parallel-path measurement with a budget of one worker per
+        // slice. For `N == 1` the parallel path also runs
+        // single-threaded by construction (no fan-out possible); the
+        // entry is kept so the criterion output has a 1-slice baseline
+        // against the parallel dispatcher's fixed overhead.
         g.bench_with_input(
             BenchmarkId::new("parallel", num_slices),
             &(cfg, frame),
             |b, (cfg, frame)| {
-                b.iter(|| decode_frame_parallel(cfg, criterion::black_box(frame)).expect("decode"));
+                b.iter(|| {
+                    decode_frame_parallel(cfg, criterion::black_box(frame), num_slices)
+                        .expect("decode")
+                });
             },
         );
     }

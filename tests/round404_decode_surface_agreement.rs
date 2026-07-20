@@ -1,22 +1,26 @@
 //! Round 404 — cross-surface decode agreement (deterministic CI mirror
 //! of the `decode_utvideo` fuzz target).
 //!
-//! The crate exposes four decode entry points over the same wire bytes:
+//! The crate exposes five decode entry points over the same wire bytes:
 //!
-//! - [`decode_frame`] — auto-dispatches serial vs. parallel by pixel
-//!   count (`decoder::PARALLEL_PIXEL_THRESHOLD`);
+//! - [`decode_frame`] — single-threaded (the round-420 threading
+//!   contract's serial default);
+//! - [`decode_frame_with_workers`] — dispatches serial vs. parallel by
+//!   caller-granted worker budget and pixel count
+//!   (`decoder::PARALLEL_PIXEL_THRESHOLD`);
 //! - [`decode_frame_serial`] — always single-threaded;
-//! - [`decode_frame_parallel`] — always fans slices across threads;
+//! - [`decode_frame_parallel`] — always fans slices across threads,
+//!   bounded by the caller-granted budget;
 //! - [`decode_frame_strict`] — serial + trailing-padding verification
 //!   (`spec/05` §4.3 / §8).
 //!
 //! Every slice's predictor state restarts at the per-slice `+128` seed
 //! (`spec/04` §§3.1, 4, 5, 7) and every slice's Huffman bit-stream is
-//! self-contained (`spec/02` §5), so all four surfaces MUST agree:
+//! self-contained (`spec/02` §5), so all five surfaces MUST agree:
 //!
-//! 1. On any self-encoded (zero-padded, `spec/05` §4.3) stream, all four
+//! 1. On any self-encoded (zero-padded, `spec/05` §4.3) stream, all five
 //!    reproduce byte-identical planes — including frames that cross the
-//!    auto-parallel threshold and genuinely multi-slice ones.
+//!    budgeted-parallel threshold and genuinely multi-slice ones.
 //! 2. On arbitrary attacker bytes, none panic, and serial / parallel /
 //!    default agree on success-vs-failure. The strict path never panics.
 //!
@@ -28,8 +32,8 @@
 
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
 use oxideav_utvideo::{
-    decode_frame, decode_frame_strict, encode_frame, EncodedFrame, Error, Extradata, Fourcc,
-    PlaneInput, StreamConfig,
+    decode_frame, decode_frame_strict, decode_frame_with_workers, encode_frame, EncodedFrame,
+    Error, Extradata, Fourcc, PlaneInput, StreamConfig,
 };
 
 /// Tiny deterministic xorshift64* PRNG — no external deps, reproducible
@@ -114,14 +118,16 @@ fn make_valid(rng: &mut Rng) -> (StreamConfig, Vec<u8>, Vec<Vec<u8>>) {
     (cfg, payload, planes)
 }
 
-/// Assert all four surfaces reproduce `planes` byte-for-byte.
+/// Assert all five surfaces reproduce `planes` byte-for-byte.
 fn assert_surfaces_agree(cfg: &StreamConfig, payload: &[u8], planes: &[Vec<u8>]) {
     let d = decode_frame(cfg, payload).expect("default decode of valid stream");
     let s = decode_frame_serial(cfg, payload).expect("serial decode");
-    let p = decode_frame_parallel(cfg, payload).expect("parallel decode");
+    let p = decode_frame_parallel(cfg, payload, 8).expect("parallel decode");
+    let b = decode_frame_with_workers(cfg, payload, 8).expect("budgeted decode");
     let strict = decode_frame_strict(cfg, payload).expect("strict decode (encoder zero-pads)");
     assert_eq!(d, s, "default vs serial diverged");
     assert_eq!(d, p, "default vs parallel diverged");
+    assert_eq!(d, b, "default vs budgeted diverged");
     assert_eq!(d, strict, "default vs strict diverged");
     assert_eq!(d.planes.len(), planes.len());
     for (dp, orig) in d.planes.iter().zip(planes.iter()) {
@@ -133,8 +139,9 @@ fn assert_surfaces_agree(cfg: &StreamConfig, payload: &[u8], planes: &[Vec<u8>])
 fn valid_streams_agree_across_all_four_surfaces() {
     let mut rng = Rng(0x1234_5678_9abc_def0);
 
-    // A large multi-slice frame that crosses the 64 Ki-pixel auto-parallel
-    // threshold, so `decode_frame` itself dispatches the threaded path.
+    // A large multi-slice frame that crosses the 64 Ki-pixel parallel
+    // threshold, so the budgeted `decode_frame_with_workers` surface
+    // genuinely dispatches the threaded path.
     {
         let fc = Fourcc::Uly4;
         let (w, h, slices) = (256u32, 256u32, 8u32);
@@ -182,18 +189,24 @@ fn arbitrary_bytes_never_panic_and_surfaces_agree_on_success() {
 
         let d = decode_frame(&cfg, &payload);
         let s = decode_frame_serial(&cfg, &payload);
-        let p = decode_frame_parallel(&cfg, &payload);
+        let p = decode_frame_parallel(&cfg, &payload, 8);
+        let bu = decode_frame_with_workers(&cfg, &payload, 8);
         // Strict must not panic; its result is unconstrained here.
         let _ = decode_frame_strict(&cfg, &payload);
 
-        // Serial / parallel / default agree on success-vs-failure.
+        // Serial / parallel / budgeted / default agree on
+        // success-vs-failure.
         assert_eq!(d.is_ok(), s.is_ok(), "default vs serial ok-mismatch");
         assert_eq!(d.is_ok(), p.is_ok(), "default vs parallel ok-mismatch");
+        assert_eq!(d.is_ok(), bu.is_ok(), "default vs budgeted ok-mismatch");
         if let (Ok(a), Ok(b)) = (&d, &s) {
             assert_eq!(a, b, "serial produced a different frame than default");
         }
         if let (Ok(a), Ok(b)) = (&d, &p) {
             assert_eq!(a, b, "parallel produced a different frame than default");
+        }
+        if let (Ok(a), Ok(b)) = (&d, &bu) {
+            assert_eq!(a, b, "budgeted produced a different frame than default");
         }
     }
 }

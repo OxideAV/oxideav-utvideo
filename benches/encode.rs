@@ -10,7 +10,11 @@
 //!   - **encode_parallel_scaling**: `bench_with_input` over slice
 //!     counts `N ∈ {1, 2, 4, 8}` at 1280×720 ULY4 with the Gradient
 //!     predictor; the Amdahl-bounded ceiling (per-plane Huffman length
-//!     build remains single-threaded) is visible in the curve.
+//!     build remains single-threaded) is visible in the curve. The
+//!     parallel entries grant a worker budget equal to the slice count
+//!     (round 420: the codec never derives a budget from the host —
+//!     worker-count scaling under a fixed slice count lives in the
+//!     `thread_scaling` bench).
 //!
 //! Run with:
 //!     cargo bench -p oxideav-utvideo --bench encode
@@ -107,7 +111,9 @@ fn bench_encode_parallel_scaling(c: &mut Criterion) {
             BenchmarkId::new("parallel", num_slices),
             &frame,
             |b, frame| {
-                b.iter(|| encode_frame_parallel(criterion::black_box(frame)).expect("encode"));
+                b.iter(|| {
+                    encode_frame_parallel(criterion::black_box(frame), num_slices).expect("encode")
+                });
             },
         );
     }

@@ -31,9 +31,15 @@
 //!
 //! ## Public API
 //!
-//! - [`decoder::decode_frame`] — decode one chunk payload.
+//! - [`decoder::decode_frame`] — decode one chunk payload (serial).
 //! - [`encoder::encode_frame`] — encode one frame from per-plane
-//!   pixel buffers; produces a chunk payload.
+//!   pixel buffers; produces a chunk payload (serial).
+//! - [`decoder::decode_frame_with_workers`] /
+//!   [`encoder::encode_frame_with_workers`] — same, with an explicit
+//!   caller-granted thread budget for the slice-parallel path. The
+//!   crate never queries host parallelism; with no budget every path
+//!   is single-threaded, and the registry trait path stays serial
+//!   until `set_execution_context` grants a budget.
 //! - [`Error`] / [`Result`] — crate-local error type.
 //!
 //! ## Cargo features
@@ -56,9 +62,10 @@ pub mod registry;
 mod roundtrip_tests;
 
 pub use crate::decoder::{
-    decode_frame, decode_frame_strict, DecodedFrame, DecodedPlane, PlaneLabel,
+    decode_frame, decode_frame_strict, decode_frame_with_workers, DecodedFrame, DecodedPlane,
+    PlaneLabel,
 };
-pub use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
+pub use crate::encoder::{encode_frame, encode_frame_with_workers, EncodedFrame, PlaneInput};
 pub use crate::error::{Error, ErrorCategory, Result};
 pub use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 pub use crate::inspect::{peek_frame, peek_frame_info, FrameLayout, PlaneLayout, SliceLayout};

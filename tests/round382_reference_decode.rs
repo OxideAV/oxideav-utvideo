@@ -36,8 +36,8 @@
 
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
 use oxideav_utvideo::{
-    decode_frame, decode_frame_strict, encode_frame, peek_frame, peek_frame_info, EncodedFrame,
-    Extradata, Fourcc, PlaneInput, Predictor, StreamConfig,
+    decode_frame, decode_frame_strict, decode_frame_with_workers, encode_frame, peek_frame,
+    peek_frame_info, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig,
 };
 
 struct Fixture {
@@ -224,7 +224,7 @@ fn serial_and_parallel_paths_reproduce_reference() {
     for fx in CORPUS {
         let cfg = config_for(fx);
         let serial = decode_frame_serial(&cfg, fx.chunk).unwrap();
-        let parallel = decode_frame_parallel(&cfg, fx.chunk).unwrap();
+        let parallel = decode_frame_parallel(&cfg, fx.chunk, 4).unwrap();
         assert_eq!(
             serial, parallel,
             "{}: serial vs parallel divergence",
@@ -439,32 +439,36 @@ fn encoder_round_trips_reference_pixels() {
 
 /// The `uly0_median_grad_s8_256` fixture is 256×256 = 65 536 luma pixels
 /// with 8 slices, so it meets the decoder's documented 64 Ki-pixel
-/// auto-parallel threshold — the default [`decode_frame`] entry point
-/// dispatches the multi-threaded per-slice path (`decoder` module docs,
-/// `spec/02` §7). This pins that the auto-dispatch parallel path decodes
+/// parallel threshold — the budgeted [`decode_frame_with_workers`]
+/// entry point dispatches the multi-threaded per-slice path when the
+/// caller grants more than one worker (`decoder` module docs,
+/// `spec/02` §7). This pins that the budgeted parallel dispatch decodes
 /// a real reference stream byte-exact (the smaller fixtures all stay on
 /// the serial side of the threshold), and that it agrees with the forced
 /// serial path on the same bytes.
 #[test]
-fn large_reference_frame_exercises_auto_parallel_path() {
+fn large_reference_frame_exercises_budgeted_parallel_path() {
     let fx = CORPUS
         .iter()
         .find(|f| f.name == "uly0_median_grad_s8_256")
         .unwrap();
     // Guard the premise: the frame must actually cross the threshold, or
-    // this test silently stops covering the parallel auto-dispatch.
+    // this test silently stops covering the parallel dispatch.
     assert!(
         (fx.width as usize) * (fx.height as usize) >= 64 * 1024 && fx.num_slices > 1,
-        "large fixture no longer crosses the auto-parallel threshold"
+        "large fixture no longer crosses the parallel threshold"
     );
     let cfg = config_for(fx);
-    let auto = decode_frame(&cfg, fx.chunk).unwrap();
+    let budgeted = decode_frame_with_workers(&cfg, fx.chunk, 8).unwrap();
     let serial = decode_frame_serial(&cfg, fx.chunk).unwrap();
-    assert_eq!(auto, serial, "auto-parallel path diverged from serial");
     assert_eq!(
-        concat_planes(&auto.planes),
+        budgeted, serial,
+        "budgeted-parallel path diverged from serial"
+    );
+    assert_eq!(
+        concat_planes(&budgeted.planes),
         fx.pixels,
-        "auto-parallel decode lost reference pixels"
+        "budgeted-parallel decode lost reference pixels"
     );
 }
 
@@ -527,7 +531,7 @@ fn gradient_mode2_streams_decode_byte_exact() {
             fx.name
         );
         assert_eq!(
-            decode_frame_parallel(&cfg, fx.chunk).unwrap(),
+            decode_frame_parallel(&cfg, fx.chunk, 4).unwrap(),
             decode_frame_serial(&cfg, fx.chunk).unwrap(),
             "{}: gradient serial vs parallel",
             fx.name
@@ -584,7 +588,7 @@ fn slice_count_128_interop_stream_decodes_byte_exact() {
     // Strict + serial/parallel equivalence.
     assert_eq!(decode_frame_strict(&cfg, fx.chunk).unwrap(), decoded);
     assert_eq!(
-        decode_frame_parallel(&cfg, fx.chunk).unwrap(),
+        decode_frame_parallel(&cfg, fx.chunk, 8).unwrap(),
         decode_frame_serial(&cfg, fx.chunk).unwrap(),
         "128-slice serial vs parallel"
     );

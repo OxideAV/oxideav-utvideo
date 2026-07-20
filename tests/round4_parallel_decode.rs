@@ -1,21 +1,23 @@
 //! Round 4 — slice-parallel decoder. `spec/02` §7 "Implementation
 //! notes": the decoder may dispatch independent slices to per-thread
-//! workers once the offset table is parsed. The new
+//! workers once the offset table is parsed. The
 //! [`decode_frame_parallel`] entry point does exactly that on a
-//! `std::thread::scope` pool sized to
-//! `min(num_slices, available_parallelism())`.
+//! `std::thread::scope` pool sized to the caller-granted worker
+//! budget clamped to the slice count (`workers.min(num_slices).max(1)`
+//! — round 420: the crate never queries host parallelism itself).
 //!
 //! The suite verifies three properties:
 //!
 //! 1. **Bit-exact equivalence.** For every fixture the parallel path
-//!    produces output identical to the serial path. This is the
-//!    correctness wall — the spec's per-slice `+128` seed and the
-//!    self-contained Huffman bit-stream make slices fully
-//!    independent, but any subtle inter-slice leak in the
-//!    implementation would diverge here.
-//! 2. **`decode_frame` auto-dispatch.** The threshold-gated entry
-//!    matches the explicit serial path on small frames and the
-//!    explicit parallel path on large frames.
+//!    produces output identical to the serial path, across worker
+//!    budgets. This is the correctness wall — the spec's per-slice
+//!    `+128` seed and the self-contained Huffman bit-stream make
+//!    slices fully independent, but any subtle inter-slice leak in
+//!    the implementation would diverge here.
+//! 2. **`decode_frame_with_workers` dispatch.** The threshold-gated
+//!    budgeted entry matches the explicit serial path on small frames
+//!    and the explicit parallel path on large frames, and the serial
+//!    `decode_frame` default always matches both.
 //! 3. **Error propagation.** A malformed slice in any position is
 //!    surfaced to the caller (the parallel join propagates the first
 //!    failing slice's error).
@@ -23,7 +25,8 @@
 #![cfg(test)]
 
 use oxideav_utvideo::decoder::{
-    decode_frame, decode_frame_parallel, decode_frame_serial, PARALLEL_PIXEL_THRESHOLD,
+    decode_frame, decode_frame_parallel, decode_frame_serial, decode_frame_with_workers,
+    PARALLEL_PIXEL_THRESHOLD,
 };
 use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
 use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
@@ -104,12 +107,17 @@ fn parallel_matches_serial_uly0_matrix() {
                     let cfg = cfg(Fourcc::Uly0, w, h, slices);
                     let bytes = build_frame(Fourcc::Uly0, &[y, u, v], w, h, pred, slices);
                     let serial = decode_frame_serial(&cfg, &bytes).unwrap();
-                    let parallel = decode_frame_parallel(&cfg, &bytes).unwrap();
-                    assert_eq!(
-                        serial.planes, parallel.planes,
-                        "drift at {}x{} slices={} pred={:?}",
-                        w, h, slices, pred
-                    );
+                    // Cover budgets below, equal to, and above the
+                    // slice count — the fan-out clamp must keep every
+                    // one bit-exact.
+                    for workers in [2usize, 4, 8] {
+                        let parallel = decode_frame_parallel(&cfg, &bytes, workers).unwrap();
+                        assert_eq!(
+                            serial.planes, parallel.planes,
+                            "drift at {}x{} slices={} pred={:?} workers={}",
+                            w, h, slices, pred, workers
+                        );
+                    }
                     cases += 1;
                 }
             }
@@ -139,7 +147,7 @@ fn parallel_matches_serial_rgb_family() {
         for pred in [Predictor::Left, Predictor::Median, Predictor::Gradient] {
             let bytes = build_frame(fc, &planes, 256, 192, pred, 4);
             let serial = decode_frame_serial(&cfg, &bytes).unwrap();
-            let parallel = decode_frame_parallel(&cfg, &bytes).unwrap();
+            let parallel = decode_frame_parallel(&cfg, &bytes, 4).unwrap();
             assert_eq!(
                 serial.planes, parallel.planes,
                 "RGB drift for {:?}/{:?}",
@@ -149,12 +157,15 @@ fn parallel_matches_serial_rgb_family() {
     }
 }
 
-/// `decode_frame` (the auto-dispatch entry) should pick the parallel
-/// path for large multi-slice frames and the serial path for small
-/// ones; in both cases the output must match the explicit-path call.
+/// `decode_frame_with_workers` (the budgeted threshold-gated entry)
+/// should pick the parallel path for large multi-slice frames under a
+/// multi-worker budget and the serial path for small ones; in every
+/// case the output must match the explicit-path calls, and the serial
+/// `decode_frame` default must match too.
 #[test]
-fn auto_dispatch_matches_both_paths() {
-    // Small frame: auto picks serial. 16×16 = 256 px (well under threshold).
+fn budgeted_dispatch_matches_both_paths() {
+    // Small frame: dispatch picks serial even with budget. 16×16 =
+    // 256 px (well under threshold).
     let small = noise_plane(0x1, 16 * 16);
     let bytes = build_frame(
         Fourcc::Uly4,
@@ -165,11 +176,13 @@ fn auto_dispatch_matches_both_paths() {
         4,
     );
     let c_small = cfg(Fourcc::Uly4, 16, 16, 4);
-    let auto = decode_frame(&c_small, &bytes).unwrap();
+    let budgeted = decode_frame_with_workers(&c_small, &bytes, 8).unwrap();
+    let default = decode_frame(&c_small, &bytes).unwrap();
     let serial = decode_frame_serial(&c_small, &bytes).unwrap();
-    let parallel = decode_frame_parallel(&c_small, &bytes).unwrap();
-    assert_eq!(auto.planes, serial.planes);
-    assert_eq!(auto.planes, parallel.planes);
+    let parallel = decode_frame_parallel(&c_small, &bytes, 8).unwrap();
+    assert_eq!(budgeted.planes, serial.planes);
+    assert_eq!(budgeted.planes, parallel.planes);
+    assert_eq!(default.planes, serial.planes);
 
     // Large frame: 320×240 = 76 800 px (above PARALLEL_PIXEL_THRESHOLD).
     const _: () = assert!(320 * 240 > PARALLEL_PIXEL_THRESHOLD);
@@ -185,11 +198,15 @@ fn auto_dispatch_matches_both_paths() {
         8,
     );
     let c_big = cfg(Fourcc::Uly0, 320, 240, 8);
-    let auto = decode_frame(&c_big, &bytes2).unwrap();
+    let budgeted = decode_frame_with_workers(&c_big, &bytes2, 8).unwrap();
+    let serial_budget = decode_frame_with_workers(&c_big, &bytes2, 1).unwrap();
+    let default = decode_frame(&c_big, &bytes2).unwrap();
     let serial = decode_frame_serial(&c_big, &bytes2).unwrap();
-    let parallel = decode_frame_parallel(&c_big, &bytes2).unwrap();
-    assert_eq!(auto.planes, serial.planes);
-    assert_eq!(auto.planes, parallel.planes);
+    let parallel = decode_frame_parallel(&c_big, &bytes2, 8).unwrap();
+    assert_eq!(budgeted.planes, serial.planes);
+    assert_eq!(budgeted.planes, parallel.planes);
+    assert_eq!(serial_budget.planes, serial.planes);
+    assert_eq!(default.planes, serial.planes, "decode_frame must be serial");
 }
 
 /// 1-slice frames bypass the parallel fan-out regardless of size
@@ -204,15 +221,17 @@ fn single_slice_serial_equiv() {
     let cfg = cfg(Fourcc::Uly0, 320, 240, 1);
     let bytes = build_frame(Fourcc::Uly0, &[y, u, v], 320, 240, Predictor::Left, 1);
     let auto = decode_frame(&cfg, &bytes).unwrap();
+    let budgeted = decode_frame_with_workers(&cfg, &bytes, 8).unwrap();
     let serial = decode_frame_serial(&cfg, &bytes).unwrap();
-    let parallel = decode_frame_parallel(&cfg, &bytes).unwrap();
+    let parallel = decode_frame_parallel(&cfg, &bytes, 8).unwrap();
     assert_eq!(auto.planes, serial.planes);
     assert_eq!(auto.planes, parallel.planes);
+    assert_eq!(auto.planes, budgeted.planes);
 }
 
 /// Stress: 256 slices on a tall enough frame (each slice 1 row). The
-/// parallel path caps thread count at `available_parallelism()` so
-/// the fanout buckets 256 slices into a handful of workers; the
+/// parallel path clamps the fan-out at the caller-granted budget so
+/// the dispatch buckets 256 slices into a handful of workers; the
 /// per-bucket loop must still emit the correct strip order.
 #[test]
 fn many_slices_one_row_each() {
@@ -230,8 +249,12 @@ fn many_slices_one_row_each() {
         256,
     );
     let serial = decode_frame_serial(&cfg, &bytes).unwrap();
-    let parallel = decode_frame_parallel(&cfg, &bytes).unwrap();
-    assert_eq!(serial.planes, parallel.planes);
+    // 1024 pins the over-budget clamp: the fan-out must cap at the
+    // 256 work units, not at the raw budget.
+    for workers in [2usize, 3, 8, 1024] {
+        let parallel = decode_frame_parallel(&cfg, &bytes, workers).unwrap();
+        assert_eq!(serial.planes, parallel.planes, "workers={workers}");
+    }
 }
 
 /// Negative path: a corrupted-byte payload must surface an error
@@ -249,7 +272,10 @@ fn parallel_error_propagation_on_corrupt_slice() {
     // plane's slice data, before the frame_info dword): this forces
     // a slice-truncated / chunk-short error in plane 2.
     bytes.truncate(bytes.len() - 8);
-    // The auto-dispatch picks the parallel path for 320×240/4 slices.
-    let res = decode_frame(&cfg, &bytes);
+    // A 4-worker budget on 320×240/4 slices dispatches the parallel
+    // path; the error must surface through the join.
+    let res = decode_frame_with_workers(&cfg, &bytes, 4);
     assert!(res.is_err(), "truncated chunk must error");
+    let res = decode_frame_parallel(&cfg, &bytes, 4);
+    assert!(res.is_err(), "truncated chunk must error (forced parallel)");
 }

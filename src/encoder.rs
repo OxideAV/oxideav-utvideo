@@ -19,7 +19,7 @@
 //! 4. Emit the chunk payload: 256-byte descriptor, slice-end-offset
 //!    table, slice data; trailing 4-byte frame-info.
 //!
-//! ## Slice-level parallelism (round 5)
+//! ## Slice-level parallelism (round 5; budget contract round 420)
 //!
 //! Mirror of the round-4 decoder parallelism. Every slice's
 //! +128-seeded predictor state is independent (`spec/04` §§3.1, 4, 5,
@@ -28,12 +28,21 @@
 //! and the per-slice bit-pack steps fan out across `std::thread::scope`.
 //! Per-plane Huffman descriptor build sits between the two parallel
 //! stages — it must aggregate the cross-slice histogram on a single
-//! thread before any slice can pack. `encode_frame` auto-dispatches
-//! the parallel path for frames whose luma pixel count crosses
-//! [`PARALLEL_PIXEL_THRESHOLD`] and whose slice count is `> 1`.
-//! Explicit [`encode_frame_serial`] / [`encode_frame_parallel`]
-//! entry points stay available for latency-sensitive or
-//! threadpool-controlled callers.
+//! thread before any slice can pack.
+//!
+//! The fan-out only happens when the **caller grants a thread
+//! budget**: this module never queries host parallelism, and every
+//! `std::thread::scope` dispatch is bounded by
+//! `workers.min(num_slices).max(1)`. [`encode_frame`] is serial;
+//! [`encode_frame_with_workers`] dispatches the parallel path when the
+//! budget exceeds 1, the slice count exceeds 1, and the luma pixel
+//! count crosses [`PARALLEL_PIXEL_THRESHOLD`];
+//! [`encode_frame_serial`] / [`encode_frame_parallel`] give explicit
+//! control. Output bytes are identical for every budget. Framework
+//! callers grant the budget through `oxideav-core`'s
+//! `ExecutionContext` / `set_execution_context` hook (see
+//! `crate::registry`); the trait path is serial until that hook is
+//! called.
 
 use crate::error::{Error, Result};
 use crate::fourcc::{Fourcc, Predictor};
@@ -69,25 +78,41 @@ pub struct EncodedFrame {
 /// (the AVI `00dc` chunk's body — the AVI chunk header itself is
 /// written by `oxideav-avi` if a container is in use).
 ///
-/// Auto-dispatches the serial or [`PARALLEL_PIXEL_THRESHOLD`]-gated
-/// parallel path; callers that want explicit control can use
-/// [`encode_frame_serial`] / [`encode_frame_parallel`] directly. The
-/// auto-dispatch path produces byte-identical output to either explicit
-/// path (verified by the round-5 parallel-encode test suite).
+/// **Serial.** Since round 420 this entry runs single-threaded — the
+/// threading contract makes one worker the default, and internal
+/// fan-out happens only when the caller grants an explicit budget.
+/// Callers that want slice-parallel encode pass a worker budget to
+/// [`encode_frame_with_workers`] (threshold-gated) or
+/// [`encode_frame_parallel`] (forced fan-out). Every path produces
+/// byte-identical output (verified by the round-5 and round-420
+/// suites).
 pub fn encode_frame(frame: &EncodedFrame) -> Result<Vec<u8>> {
+    encode_frame_serial(frame)
+}
+
+/// Budgeted encode: dispatches the slice-parallel path when the
+/// caller-granted `workers` budget exceeds 1, the frame has more than
+/// one slice, **and** the luma pixel count crosses
+/// [`PARALLEL_PIXEL_THRESHOLD`] (below it the thread-spawn + join cost
+/// typically dominates the per-slice work). Otherwise encodes
+/// serially. Output bytes are identical for every budget.
+///
+/// The fan-out never exceeds `workers.min(num_slices).max(1)` threads
+/// and the host is never queried — deriving a budget from the machine
+/// (e.g. via `std::thread::available_parallelism`) is the caller's
+/// decision.
+pub fn encode_frame_with_workers(frame: &EncodedFrame, workers: usize) -> Result<Vec<u8>> {
     let total = (frame.width as usize) * (frame.height as usize);
-    if frame.num_slices > 1 && total >= PARALLEL_PIXEL_THRESHOLD {
-        encode_frame_parallel(frame)
+    if workers > 1 && frame.num_slices > 1 && total >= PARALLEL_PIXEL_THRESHOLD {
+        encode_frame_parallel(frame, workers)
     } else {
         encode_frame_serial(frame)
     }
 }
 
 /// Serial-path encode: one plane after another, slices within a plane
-/// also serialised. Always used for `num_slices == 1` or for frames
-/// smaller than [`PARALLEL_PIXEL_THRESHOLD`]. Exposed so callers can
-/// opt out of the thread-pool spin-up cost in latency-sensitive
-/// single-frame paths.
+/// also serialised. Exposed so callers can opt out of the thread-pool
+/// spin-up cost in latency-sensitive single-frame paths.
 pub fn encode_frame_serial(frame: &EncodedFrame) -> Result<Vec<u8>> {
     let (mut planes, plane_count) = prepare_planes(frame)?;
     apply_rgb_decorrelate(frame.fourcc, &mut planes);
@@ -106,11 +131,15 @@ pub fn encode_frame_serial(frame: &EncodedFrame) -> Result<Vec<u8>> {
 }
 
 /// Parallel-path encode: per-plane forward-predict and per-slice
-/// bit-pack both run on `std::thread::scope`. Every slice's predictor
-/// state restarts at the +128 seed (`spec/04` §§3.1, 4, 5, 7) and every
-/// slice's Huffman bit-stream is self-contained (`spec/02` §5), so the
-/// fan-out is bit-exact equivalent to the serial path.
-pub fn encode_frame_parallel(frame: &EncodedFrame) -> Result<Vec<u8>> {
+/// bit-pack both run on `std::thread::scope`, fanned out across at
+/// most `workers.min(num_slices).max(1)` threads regardless of frame
+/// size (no [`PARALLEL_PIXEL_THRESHOLD`] gate). Every slice's
+/// predictor state restarts at the +128 seed (`spec/04` §§3.1, 4, 5,
+/// 7) and every slice's Huffman bit-stream is self-contained
+/// (`spec/02` §5), so the fan-out is bit-exact equivalent to the
+/// serial path. A `workers` budget of 0 or 1 degenerates to the
+/// serial walk.
+pub fn encode_frame_parallel(frame: &EncodedFrame, workers: usize) -> Result<Vec<u8>> {
     let (mut planes, plane_count) = prepare_planes(frame)?;
     apply_rgb_decorrelate(frame.fourcc, &mut planes);
 
@@ -119,9 +148,16 @@ pub fn encode_frame_parallel(frame: &EncodedFrame) -> Result<Vec<u8>> {
         let (pw, ph) = frame.fourcc.plane_dim(i, frame.width, frame.height);
         let pw = pw as usize;
         let ph = ph as usize;
-        let slice_residuals = forward_parallel(frame.predictor, plane, pw, ph, frame.num_slices);
+        let slice_residuals =
+            forward_parallel(frame.predictor, plane, pw, ph, frame.num_slices, workers);
         let (descriptor, table) = build_plane_huffman(&slice_residuals)?;
-        let blob = encode_plane_parallel(&descriptor, &table, &slice_residuals, frame.num_slices)?;
+        let blob = encode_plane_parallel(
+            &descriptor,
+            &table,
+            &slice_residuals,
+            frame.num_slices,
+            workers,
+        )?;
         plane_blobs.push(blob);
     }
     Ok(assemble_payload(&plane_blobs, frame.predictor))
@@ -210,8 +246,11 @@ fn forward_parallel(
     width: usize,
     plane_height: usize,
     num_slices: usize,
+    workers: usize,
 ) -> Vec<Vec<u8>> {
-    let par = thread_fanout(num_slices);
+    // Caller-granted budget clamped to the work-unit count; the host
+    // is deliberately NOT queried (threading contract).
+    let par = workers.min(num_slices).max(1);
     if par <= 1 || num_slices <= 1 {
         return predict::forward(pred, plane, width, plane_height, num_slices);
     }
@@ -257,16 +296,6 @@ fn forward_parallel(
         }
     });
     out
-}
-
-/// Bound the thread fan-out by `available_parallelism()`, but never
-/// exceed `num_slices` (more threads than tasks is pointless).
-fn thread_fanout(num_slices: usize) -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(num_slices)
-        .max(1)
 }
 
 /// Build a 256-byte code-length descriptor + matching [`HuffmanTable`]
@@ -504,8 +533,11 @@ fn encode_plane_parallel(
     table: &HuffmanTable,
     slice_residuals: &[Vec<u8>],
     num_slices: usize,
+    workers: usize,
 ) -> Result<Vec<u8>> {
-    let par = thread_fanout(num_slices);
+    // Caller-granted budget clamped to the work-unit count; the host
+    // is deliberately NOT queried (threading contract).
+    let par = workers.min(num_slices).max(1);
     if par <= 1 || num_slices <= 1 {
         return encode_plane_serial(descriptor, table, slice_residuals, num_slices);
     }

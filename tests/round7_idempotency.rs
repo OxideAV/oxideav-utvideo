@@ -53,7 +53,9 @@
 //! standard well-known generator used purely as a deterministic
 //! content source, not lifted from any codec implementation.
 
-use oxideav_utvideo::encoder::{encode_frame_parallel, encode_frame_serial};
+use oxideav_utvideo::encoder::{
+    encode_frame_parallel, encode_frame_serial, encode_frame_with_workers,
+};
 use oxideav_utvideo::{
     decode_frame, encode_frame, DecodedFrame, EncodedFrame, Extradata, Fourcc, PlaneInput,
     Predictor, StreamConfig,
@@ -192,15 +194,17 @@ fn assert_pixel_roundtrip(src: &EncodedFrame, decoded: &DecodedFrame, ctx: &str)
 #[test]
 fn encode_is_deterministic_and_path_invariant() {
     // For every FOURCC × predictor, on a frame large enough that the
-    // auto-dispatch path would *choose* parallel (> 64 Ki luma px and
-    // > 1 slice), the three entry points must all emit byte-identical
-    // payloads, and a repeat call must reproduce them exactly.
+    // budgeted dispatch path would *choose* parallel (> 64 Ki luma px
+    // and > 1 slice under a multi-worker budget), the entry points
+    // must all emit byte-identical payloads, and a repeat call must
+    // reproduce them exactly.
     //
     // 320×216 luma = 69 120 px > PARALLEL_PIXEL_THRESHOLD (65 536), so
-    // `encode_frame` takes the parallel branch; `encode_frame_serial`
-    // forces the serial branch. Byte-equality across them is the
-    // round-5 parallel-correctness guarantee, re-pinned here as a byte
-    // invariant rather than only a pixel one.
+    // `encode_frame_with_workers(_, 8)` takes the parallel branch;
+    // `encode_frame` and `encode_frame_serial` run the serial branch.
+    // Byte-equality across them is the round-5 parallel-correctness
+    // guarantee, re-pinned here as a byte invariant rather than only a
+    // pixel one.
     let (w, h) = (320u32, 216u32);
     let slices = 8usize;
     let mut cells = 0usize;
@@ -210,20 +214,19 @@ fn encode_is_deterministic_and_path_invariant() {
             // a non-trivial alphabet and the tie-break actually matters.
             let frame = random_frame(fc, w, h, slices, pred, 0xC0FFEE ^ fc as u64, 0x3f);
 
-            let auto1 = encode_frame(&frame).expect("encode_frame auto");
-            let auto2 = encode_frame(&frame).expect("encode_frame auto repeat");
+            let auto1 = encode_frame(&frame).expect("encode_frame");
+            let auto2 = encode_frame(&frame).expect("encode_frame repeat");
             let ser = encode_frame_serial(&frame).expect("encode_frame_serial");
-            let par = encode_frame_parallel(&frame).expect("encode_frame_parallel");
+            let par = encode_frame_parallel(&frame, 8).expect("encode_frame_parallel");
+            let bud = encode_frame_with_workers(&frame, 8).expect("encode_frame_with_workers");
 
             assert_eq!(
                 auto1, auto2,
                 "{fc:?}/{pred:?}: encode_frame not deterministic across two calls"
             );
-            assert_eq!(auto1, ser, "{fc:?}/{pred:?}: auto-dispatch != serial bytes");
-            assert_eq!(
-                auto1, par,
-                "{fc:?}/{pred:?}: auto-dispatch != parallel bytes"
-            );
+            assert_eq!(auto1, ser, "{fc:?}/{pred:?}: default != serial bytes");
+            assert_eq!(auto1, par, "{fc:?}/{pred:?}: default != parallel bytes");
+            assert_eq!(auto1, bud, "{fc:?}/{pred:?}: default != budgeted bytes");
             cells += 1;
         }
     }

@@ -16,7 +16,8 @@
 //!   byte 0      : FourCC selector (mod 5)
 //!   byte 1      : width  seed  (mapped into 1..=64, snapped even)
 //!   byte 2      : height seed  (mapped into 1..=64, snapped even)
-//!   byte 3      : slice-count seed (1..=16)
+//!   byte 3      : low nibble → slice-count seed (1..=16);
+//!                 high nibble → parallel worker budget (1..=8)
 //!   bytes 4..   : chunk payload fed verbatim to decode_frame
 //! ```
 //!
@@ -26,9 +27,10 @@
 //! decoder bug) — keeping the budget on genuine parser defects: index
 //! math on the descriptor / offset table, slice-range arithmetic, and
 //! the Huffman bit reader. Beyond panic-freedom, the harness asserts the
-//! cross-surface contract: the auto-dispatch, forced-serial, and
-//! forced-parallel decodes agree on success-vs-failure and on the exact
-//! decoded frame, and the strict padding scanner stays panic-free.
+//! cross-surface contract: the serial default, forced-serial, and
+//! forced-parallel (budget-clamped) decodes agree on success-vs-failure
+//! and on the exact decoded frame, and the strict padding scanner stays
+//! panic-free.
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
@@ -56,10 +58,14 @@ fuzz_target!(|data: &[u8]| {
     let width = ((header[1] as u32 % 64) + 2) & !1; // even, 2..=64
     let height = ((header[2] as u32 % 64) + 2) & !1; // even, 2..=64
 
-    // Slice count 1..=16. The extradata flags top byte encodes
-    // `num_slices - 1`; the Huffman bit (0x1) must be set or the parse
-    // rejects the stream before the decoder runs.
+    // Slice count 1..=16 from the low nibble. The extradata flags top
+    // byte encodes `num_slices - 1`; the Huffman bit (0x1) must be set
+    // or the parse rejects the stream before the decoder runs. The
+    // high nibble picks the parallel path's worker budget (1..=8) so
+    // the budget clamp `workers.min(num_slices).max(1)` is fuzzed
+    // across under-, exact-, and over-subscribed fan-outs.
     let num_slices = (header[3] as u32 % 16) + 1;
+    let workers = ((header[3] >> 4) as usize % 8) + 1;
     let flags = 0x0000_0001 | ((num_slices - 1) << 24);
     let extradata = Extradata {
         encoder_version: 0x0100_00f0,
@@ -74,15 +80,16 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Drive all four decode entry points. None may panic, and the three
-    // lenient surfaces (auto-dispatch / forced-serial / forced-parallel)
-    // must agree on success-vs-failure and — on success — on the exact
-    // decoded frame. Every slice's predictor state restarts at the
-    // per-slice +128 seed (`spec/04` §§3.1, 4, 5, 7) and every slice's
-    // Huffman bit-stream is self-contained (`spec/02` §5), so the
-    // fan-out is bit-exact equivalent to the serial walk.
+    // lenient surfaces (serial default / forced-serial / forced-parallel
+    // under the fuzzed worker budget) must agree on success-vs-failure
+    // and — on success — on the exact decoded frame. Every slice's
+    // predictor state restarts at the per-slice +128 seed (`spec/04`
+    // §§3.1, 4, 5, 7) and every slice's Huffman bit-stream is
+    // self-contained (`spec/02` §5), so the fan-out is bit-exact
+    // equivalent to the serial walk.
     let d = decode_frame(&cfg, payload);
     let s = decode_frame_serial(&cfg, payload);
-    let p = decode_frame_parallel(&cfg, payload);
+    let p = decode_frame_parallel(&cfg, payload, workers);
     // The strict padding scanner (`spec/05` §4.3) must also stay
     // panic-free on arbitrary bytes; its accept/reject verdict is
     // unconstrained here.
