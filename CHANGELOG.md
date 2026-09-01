@@ -6,6 +6,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-utvideo/compare/v0.0.3...v0.0.4) - 2026-09-01
+
+### Added
+
+- *(registry)* adopt ExecutionContext on the Decoder and Encoder trait impls
+- *(threading)* [**breaking**] caller-granted worker budgets replace ambient host parallelism
+
+### Fixed
+
+- complete the canonical-extradata rename across tests/benches/README/CHANGELOG (first scrub commit missed non-src callers → CI red)
+- *(decode)* reject single-symbol plane carrying slice data (spec/05 §6.1)
+
+### Other
+
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+- document the serial-by-default threading contract prominently
+- *(thread_scaling)* worker-budget sweep for decode + encode
+- *(round420)* output invariance across execution budgets on the 19-fixture corpus
+- describe the extradata carriage by its canonical form, not a third-party encoder name (rename ffmpeg_for→canonical_extradata_for, ffmpeg_source_format_tag→source_format_tag, reword prose)
+- *(changelog,readme)* record single-symbol rejection + surface-agreement harness
+- *(decode)* cross-surface agreement harness + fuzz all four decode paths
+
 ### Changed — BREAKING: threading is now opt-in (execution-context contract)
 
 - **`decode_frame` and `encode_frame` are now strictly single-threaded.**
