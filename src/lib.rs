@@ -53,8 +53,12 @@ pub mod decoder;
 pub mod encoder;
 pub mod error;
 pub mod fourcc;
+// internal — exposed for tests/benches/examples; not part of the stable API
+#[doc(hidden)]
 pub mod huffman;
 pub mod inspect;
+// internal — exposed for tests/benches/examples; not part of the stable API
+#[doc(hidden)]
 pub mod predict;
 #[cfg(feature = "registry")]
 pub mod registry;
