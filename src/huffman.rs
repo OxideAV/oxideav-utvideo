@@ -438,7 +438,7 @@ impl HuffmanTable {
                 None => {
                     return Err(Error::HuffmanDecodeFailure {
                         bit_position: bp_start,
-                    })
+                    });
                 }
             }
         }
@@ -613,7 +613,7 @@ impl<'a> BitReader<'a> {
         // Walk bit-by-bit at the boundary, then word-at-a-time once
         // word-aligned, to keep the common (all-zero, often <32 bits)
         // case cheap without a per-bit loop over whole zero words.
-        while bp < self.total_bits && bp % 32 != 0 {
+        while bp < self.total_bits && !bp.is_multiple_of(32) {
             if self.bit_at(bp) {
                 return Some(bp);
             }
@@ -861,7 +861,7 @@ mod tests {
         // 256 bits = 32 bytes, no padding required.
         assert_eq!(bytes.len(), 32);
         assert_eq!(&bytes[0..4], &[0xff, 0xff, 0xff, 0x7f]);
-        for chunk in bytes[4..].chunks_exact(4) {
+        for chunk in bytes[4..].as_chunks::<4>().0 {
             assert_eq!(chunk, &[0xff, 0xff, 0xff, 0xff]);
         }
     }

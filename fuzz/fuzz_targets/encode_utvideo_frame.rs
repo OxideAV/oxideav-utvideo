@@ -52,8 +52,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_utvideo::{
-    decode_frame, encode_frame, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor,
-    StreamConfig,
+    EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, decode_frame,
+    encode_frame,
 };
 
 fuzz_target!(|data: &[u8]| {

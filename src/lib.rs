@@ -66,17 +66,17 @@ pub mod registry;
 mod roundtrip_tests;
 
 pub use crate::decoder::{
-    decode_frame, decode_frame_strict, decode_frame_with_workers, DecodedFrame, DecodedPlane,
-    PlaneLabel,
+    DecodedFrame, DecodedPlane, PlaneLabel, decode_frame, decode_frame_strict,
+    decode_frame_with_workers,
 };
-pub use crate::encoder::{encode_frame, encode_frame_with_workers, EncodedFrame, PlaneInput};
+pub use crate::encoder::{EncodedFrame, PlaneInput, encode_frame, encode_frame_with_workers};
 pub use crate::error::{Error, ErrorCategory, Result};
 pub use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
-pub use crate::inspect::{peek_frame, peek_frame_info, FrameLayout, PlaneLayout, SliceLayout};
+pub use crate::inspect::{FrameLayout, PlaneLayout, SliceLayout, peek_frame, peek_frame_info};
 
 // Framework integration — only when the `registry` feature is on.
 #[cfg(feature = "registry")]
-pub use crate::registry::{register, register_codecs, CODEC_ID_STR};
+pub use crate::registry::{CODEC_ID_STR, register, register_codecs};
 
 #[cfg(feature = "registry")]
 oxideav_core::register!("oxideav-utvideo", register);

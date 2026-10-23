@@ -130,10 +130,10 @@ impl Fourcc {
             return Err(Error::DimensionConstraint("width/height must be > 0"));
         }
         match self {
-            Fourcc::Uly0 if width % 2 != 0 || height % 2 != 0 => Err(Error::DimensionConstraint(
-                "ULY0 requires even width and height",
-            )),
-            Fourcc::Uly2 if width % 2 != 0 => {
+            Fourcc::Uly0 if !width.is_multiple_of(2) || !height.is_multiple_of(2) => Err(
+                Error::DimensionConstraint("ULY0 requires even width and height"),
+            ),
+            Fourcc::Uly2 if !width.is_multiple_of(2) => {
                 Err(Error::DimensionConstraint("ULY2 requires even width"))
             }
             _ => Ok(()),

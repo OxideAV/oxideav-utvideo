@@ -29,8 +29,8 @@
 //! All assertions go through the public API only.
 
 use oxideav_utvideo::{
-    decode_frame, encode_frame, DecodedFrame, EncodedFrame, Extradata, Fourcc, PlaneInput,
-    Predictor, StreamConfig,
+    DecodedFrame, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig,
+    decode_frame, encode_frame,
 };
 
 fn cfg_for(fc: Fourcc, w: u32, h: u32, num_slices: usize) -> StreamConfig {
@@ -302,7 +302,7 @@ fn left_continuous_wrap_across_rows_verifies_per_slice_state() {
     let h = 16u32;
     let cfg = cfg_for(fc, w, h, 1);
     let plane: Vec<u8> = (0..h)
-        .flat_map(|r| std::iter::repeat(((r * 7) & 0xff) as u8).take(w as usize))
+        .flat_map(|r| std::iter::repeat_n(((r * 7) & 0xff) as u8, w as usize))
         .collect();
     let frame = EncodedFrame {
         fourcc: fc,

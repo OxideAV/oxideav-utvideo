@@ -45,8 +45,8 @@
 //!    `Error::MultipleSingleSymbolSentinels` and never crash.
 
 use oxideav_utvideo::{
-    huffman::{BitWriter, HuffmanTable},
     Error,
+    huffman::{BitWriter, HuffmanTable},
 };
 
 /// Cheap xorshift32 — deterministic, no `rand` dep.

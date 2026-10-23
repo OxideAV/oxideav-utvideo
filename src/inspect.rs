@@ -561,7 +561,7 @@ impl PlaneLayout {
             }
             // Ascend one level: pair siblings into parents. An odd count
             // leaves an unpaired leaf — not a complete code.
-            if nodes % 2 != 0 {
+            if !nodes.is_multiple_of(2) {
                 return false;
             }
             nodes /= 2;
@@ -914,7 +914,7 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
+    use crate::encoder::{EncodedFrame, PlaneInput, encode_frame};
     use crate::fourcc::{Extradata, Fourcc};
 
     fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {

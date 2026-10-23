@@ -54,7 +54,7 @@ use oxideav_core::{
 };
 
 use oxideav_utvideo::decoder::decode_frame as direct_decode;
-use oxideav_utvideo::encoder::{encode_frame as direct_encode, EncodedFrame, PlaneInput};
+use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput, encode_frame as direct_encode};
 use oxideav_utvideo::fourcc::{Extradata, Fourcc, StreamConfig};
 use oxideav_utvideo::registry::CODEC_ID_STR;
 

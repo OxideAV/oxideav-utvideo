@@ -35,10 +35,10 @@
 #![cfg(test)]
 
 use oxideav_utvideo::decoder::{
-    decode_frame, decode_frame_parallel, decode_frame_serial, decode_frame_with_workers,
-    PARALLEL_PIXEL_THRESHOLD,
+    PARALLEL_PIXEL_THRESHOLD, decode_frame, decode_frame_parallel, decode_frame_serial,
+    decode_frame_with_workers,
 };
-use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput, encode_frame};
 use oxideav_utvideo::error::Error;
 use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 

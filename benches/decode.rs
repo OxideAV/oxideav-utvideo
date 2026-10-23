@@ -22,10 +22,10 @@
 //! Run with:
 //!     cargo bench -p oxideav-utvideo --bench decode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_utvideo::decoder::{decode_frame, decode_frame_parallel, decode_frame_serial};
-use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput, encode_frame};
 use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 
 /// Cheap deterministic xorshift32 — fills plane data with non-zero,

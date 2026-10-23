@@ -19,7 +19,7 @@
 //! pins rejection on both surfaces, plus a valid single-symbol frame
 //! that both surfaces still accept.
 
-use oxideav_utvideo::{decode_frame, peek_frame, Error, Extradata, Fourcc, StreamConfig};
+use oxideav_utvideo::{Error, Extradata, Fourcc, StreamConfig, decode_frame, peek_frame};
 
 /// Build a ULY4 W×H, 1-slice `StreamConfig`.
 fn cfg_uly4(w: u32, h: u32) -> StreamConfig {
@@ -56,7 +56,7 @@ fn build_payload(plane0_slice_bytes: usize) -> Vec<u8> {
     //     of trailing slice data behind a non-zero end offset. ---
     out.extend_from_slice(&single_symbol_descriptor(42));
     out.extend_from_slice(&(plane0_slice_bytes as u32).to_le_bytes()); // slice_end_offsets[0]
-    out.extend(std::iter::repeat(0u8).take(plane0_slice_bytes)); // stray slice data
+    out.extend(std::iter::repeat_n(0u8, plane0_slice_bytes)); // stray slice data
 
     // --- Planes 1, 2: valid single-symbol, zero slice data. ---
     for sym in [10u8, 20u8] {

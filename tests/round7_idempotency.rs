@@ -57,8 +57,8 @@ use oxideav_utvideo::encoder::{
     encode_frame_parallel, encode_frame_serial, encode_frame_with_workers,
 };
 use oxideav_utvideo::{
-    decode_frame, encode_frame, DecodedFrame, EncodedFrame, Extradata, Fourcc, PlaneInput,
-    Predictor, StreamConfig,
+    DecodedFrame, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig,
+    decode_frame, encode_frame,
 };
 
 // ----------------------------------------------------------------------

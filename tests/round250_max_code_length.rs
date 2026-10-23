@@ -39,7 +39,7 @@
 //!   round-244 active-count accessor and the round-250 max-length
 //!   accessor are linked by this typed lower bound.
 
-use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput, encode_frame};
 use oxideav_utvideo::inspect::peek_frame;
 use oxideav_utvideo::{Extradata, Fourcc, Predictor, StreamConfig};
 

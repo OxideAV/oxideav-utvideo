@@ -34,7 +34,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
-use oxideav_utvideo::{decode_frame, decode_frame_strict, Extradata, Fourcc, StreamConfig};
+use oxideav_utvideo::{Extradata, Fourcc, StreamConfig, decode_frame, decode_frame_strict};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 {

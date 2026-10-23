@@ -31,7 +31,7 @@
 //!   convenience method's return value equals the count of
 //!   descriptor bytes equal to `255`.
 
-use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput, encode_frame};
 use oxideav_utvideo::inspect::peek_frame;
 use oxideav_utvideo::{Extradata, Fourcc, Predictor, StreamConfig};
 

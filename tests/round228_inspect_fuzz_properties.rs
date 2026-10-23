@@ -53,8 +53,8 @@
 //!    well-formed frame" regression directly.
 
 use oxideav_utvideo::{
-    decode_frame, encode_frame, peek_frame, peek_frame_info, EncodedFrame, Error, Extradata,
-    Fourcc, PlaneInput, Predictor, StreamConfig,
+    EncodedFrame, Error, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, decode_frame,
+    encode_frame, peek_frame, peek_frame_info,
 };
 
 /// Cheap xorshift32 — deterministic, no `rand` dep.

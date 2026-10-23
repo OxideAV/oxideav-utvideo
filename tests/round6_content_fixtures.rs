@@ -42,8 +42,8 @@
 //! 2 FOURCCs (ULY0 + ULY4) at 256×192 with 8 slices = 32 cells.
 
 use oxideav_utvideo::{
-    decode_frame, encode_frame, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor,
-    StreamConfig,
+    EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, decode_frame,
+    encode_frame,
 };
 
 // ----------------------------------------------------------------------

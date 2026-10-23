@@ -91,7 +91,7 @@
 //! parser defects.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_utvideo::{decode_frame, peek_frame, peek_frame_info, Extradata, Fourcc, StreamConfig};
+use oxideav_utvideo::{Extradata, Fourcc, StreamConfig, decode_frame, peek_frame, peek_frame_info};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 {

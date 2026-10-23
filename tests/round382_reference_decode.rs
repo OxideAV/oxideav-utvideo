@@ -36,8 +36,8 @@
 
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
 use oxideav_utvideo::{
-    decode_frame, decode_frame_strict, decode_frame_with_workers, encode_frame, peek_frame,
-    peek_frame_info, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig,
+    EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, decode_frame,
+    decode_frame_strict, decode_frame_with_workers, encode_frame, peek_frame, peek_frame_info,
 };
 
 struct Fixture {
@@ -53,7 +53,7 @@ struct Fixture {
 }
 
 macro_rules! fixtures {
-    ($(($name:literal, $fcc:literal, $w:expr, $h:expr, $slices:expr, $pred:ident)),* $(,)?) => {
+    ($(($name:literal, $fcc:literal, $w:expr_2021, $h:expr_2021, $slices:expr_2021, $pred:ident)),* $(,)?) => {
         &[ $(
             Fixture {
                 name: $name,

@@ -34,8 +34,8 @@
 //! Slice counts: 1, 2, 4, 8 (filtered when slice height would be 0).
 
 use oxideav_utvideo::{
-    decode_frame, encode_frame, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor,
-    StreamConfig,
+    EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, decode_frame,
+    encode_frame,
 };
 
 // ----------------------------------------------------------------------
@@ -140,8 +140,8 @@ fn dims_legal(fc: Fourcc, w: u32, h: u32) -> bool {
         return false;
     }
     match fc {
-        Fourcc::Uly0 => w % 2 == 0 && h % 2 == 0,
-        Fourcc::Uly2 => w % 2 == 0,
+        Fourcc::Uly0 => w.is_multiple_of(2) && h.is_multiple_of(2),
+        Fourcc::Uly2 => w.is_multiple_of(2),
         Fourcc::Uly4 | Fourcc::Ulrg | Fourcc::Ulra => true,
     }
 }

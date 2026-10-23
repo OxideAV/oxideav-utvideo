@@ -47,8 +47,8 @@
 //! decode-free path into the per-frame byte layout.
 
 use oxideav_utvideo::{
-    decode_frame, encode_frame, peek_frame, peek_frame_info, EncodedFrame, Error, Extradata,
-    Fourcc, PlaneInput, Predictor, StreamConfig,
+    EncodedFrame, Error, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, decode_frame,
+    encode_frame, peek_frame, peek_frame_info,
 };
 
 fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {

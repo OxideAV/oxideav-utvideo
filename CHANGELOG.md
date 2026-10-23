@@ -8,6 +8,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed — BREAKING: threading is now opt-in (execution-context contract)
 
+- edition 2024, MSRV 1.95
 - **`decode_frame` and `encode_frame` are now strictly single-threaded.**
   The crate adopts the framework threading contract: a codec runs
   serial until the caller grants a thread budget, and no code path

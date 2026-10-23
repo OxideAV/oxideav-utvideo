@@ -12,7 +12,7 @@
 #![cfg(test)]
 
 use crate::decoder::decode_frame;
-use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use crate::encoder::{EncodedFrame, PlaneInput, encode_frame};
 use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 
 fn deterministic_plane(seed: u64, n: usize) -> Vec<u8> {

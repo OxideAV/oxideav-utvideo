@@ -46,7 +46,7 @@
 #![cfg(test)]
 
 use oxideav_utvideo::decoder::decode_frame;
-use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput, encode_frame};
 use oxideav_utvideo::error::Error;
 use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 use oxideav_utvideo::huffman::{BitReader, BitWriter};

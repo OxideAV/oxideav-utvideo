@@ -22,7 +22,7 @@
 //!   (`row_count` collapses to zero per `spec/02` §5.1).
 
 use oxideav_utvideo::{
-    encode_frame, peek_frame, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig,
+    EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, encode_frame, peek_frame,
 };
 
 fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {

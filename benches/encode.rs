@@ -19,10 +19,10 @@
 //! Run with:
 //!     cargo bench -p oxideav-utvideo --bench encode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_utvideo::encoder::{encode_frame, encode_frame_parallel, encode_frame_serial};
 use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput};
+use oxideav_utvideo::encoder::{encode_frame, encode_frame_parallel, encode_frame_serial};
 use oxideav_utvideo::fourcc::{Fourcc, Predictor};
 
 fn xorshift_byte(state: &mut u32) -> u8 {

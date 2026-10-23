@@ -34,7 +34,7 @@
 //!   every active symbol shares the one tier, so the count saturates
 //!   at `active_symbol_count`.
 
-use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput, encode_frame};
 use oxideav_utvideo::inspect::peek_frame;
 use oxideav_utvideo::{Extradata, Fourcc, Predictor, StreamConfig};
 

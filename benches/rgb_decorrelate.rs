@@ -20,7 +20,7 @@
 //! Run with:
 //!     cargo bench -p oxideav-utvideo --bench rgb_decorrelate
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_utvideo::predict::{forward_decorrelate_rgb, inverse_decorrelate_rgb};
 

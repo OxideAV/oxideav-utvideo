@@ -22,8 +22,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use oxideav_utvideo::{
-    decode_frame, encode_frame, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor,
-    StreamConfig,
+    EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, decode_frame,
+    encode_frame,
 };
 
 fn corpus_dir() -> PathBuf {
@@ -193,7 +193,7 @@ fn every_fourcc_with_predictor_left_roundtrips() {
         // Big enough payload for any FourCC's plane sum at 8×8:
         // ULRA needs 4 × 64 = 256 bytes; everything smaller fits.
         let mut bytes = header.to_vec();
-        bytes.extend(std::iter::repeat(0x80u8).take(256));
+        bytes.extend(std::iter::repeat_n(0x80u8, 256));
         drive(&bytes);
     }
 }
@@ -205,7 +205,7 @@ fn every_predictor_with_uly2_roundtrips() {
     for pred_sel in 0u8..4 {
         let mut bytes = vec![/* ULY2 */ 1, 6, 6, pred_sel, 2];
         // ULY2 8×8 = 64 + 32 + 32 = 128 plane bytes.
-        bytes.extend(std::iter::repeat(0x80u8).take(128));
+        bytes.extend(std::iter::repeat_n(0x80u8, 128));
         drive(&bytes);
     }
 }
@@ -216,7 +216,7 @@ fn slice_count_capped_at_height() {
     // target's `.min(height)` step is what prevents a "more slices than
     // rows" caller bug from short-circuiting the harness on every input.
     let mut bytes = vec![/* ULY4 */ 2, 2, 2, /* Median */ 3, 15];
-    bytes.extend(std::iter::repeat(0x40u8).take(48)); // ULY4 4×4 ×3 planes.
+    bytes.extend(std::iter::repeat_n(0x40u8, 48)); // ULY4 4×4 ×3 planes.
     drive(&bytes);
 }
 

@@ -359,11 +359,7 @@ fn build_lengths(counts: &[u64; 256], max_length: u8) -> Result<Vec<u8>> {
     let mut symbols: Vec<(u64, u8)> = (0..=255u8)
         .filter_map(|s| {
             let c = counts[s as usize];
-            if c == 0 {
-                None
-            } else {
-                Some((c, s))
-            }
+            if c == 0 { None } else { Some((c, s)) }
         })
         .collect();
     if symbols.len() <= 1 {

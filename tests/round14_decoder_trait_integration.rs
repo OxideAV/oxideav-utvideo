@@ -57,10 +57,10 @@ use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, CodecTag, Decoder, Error as CoreError, Frame, Packet,
     PixelFormat, ProbeContext, TimeBase,
 };
-use oxideav_utvideo::decoder::{decode_frame, DecodedPlane, PlaneLabel};
-use oxideav_utvideo::encoder::{encode_frame, EncodedFrame, PlaneInput};
+use oxideav_utvideo::decoder::{DecodedPlane, PlaneLabel, decode_frame};
+use oxideav_utvideo::encoder::{EncodedFrame, PlaneInput, encode_frame};
 use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
-use oxideav_utvideo::registry::{register_codecs, CODEC_ID_STR};
+use oxideav_utvideo::registry::{CODEC_ID_STR, register_codecs};
 
 // ──────────────────────── helpers ────────────────────────
 

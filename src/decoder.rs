@@ -629,7 +629,7 @@ fn decode_plane_parallel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::{encode_frame, EncodedFrame, PlaneInput};
+    use crate::encoder::{EncodedFrame, PlaneInput, encode_frame};
     use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 
     fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {

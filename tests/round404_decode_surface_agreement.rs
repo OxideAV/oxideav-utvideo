@@ -32,8 +32,8 @@
 
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
 use oxideav_utvideo::{
-    decode_frame, decode_frame_strict, decode_frame_with_workers, encode_frame, EncodedFrame,
-    Error, Extradata, Fourcc, PlaneInput, StreamConfig,
+    EncodedFrame, Error, Extradata, Fourcc, PlaneInput, StreamConfig, decode_frame,
+    decode_frame_strict, decode_frame_with_workers, encode_frame,
 };
 
 /// Tiny deterministic xorshift64* PRNG — no external deps, reproducible
@@ -242,15 +242,12 @@ fn strict_agrees_with_lenient_or_flags_padding() {
                 // decodes both versions to the same planes (i.e. the
                 // flipped bit was genuine padding, not a code bit).
                 if let (Ok(a), Ok(b)) = (decode_frame(&cfg, &payload), decode_frame(&cfg, &corrupt))
+                    && a == b
                 {
-                    if a == b {
-                        // The flip changed only padding: strict must now
-                        // reject the corrupted stream.
-                        if let Err(Error::NonZeroPadding { .. }) =
-                            decode_frame_strict(&cfg, &corrupt)
-                        {
-                            checked_padding += 1;
-                        }
+                    // The flip changed only padding: strict must now
+                    // reject the corrupted stream.
+                    if let Err(Error::NonZeroPadding { .. }) = decode_frame_strict(&cfg, &corrupt) {
+                        checked_padding += 1;
                     }
                 }
                 let _ = before;

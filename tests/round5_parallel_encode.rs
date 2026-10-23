@@ -26,8 +26,8 @@
 
 use oxideav_utvideo::decoder::{decode_frame_parallel, decode_frame_serial};
 use oxideav_utvideo::encoder::{
-    encode_frame, encode_frame_parallel, encode_frame_serial, encode_frame_with_workers,
-    EncodedFrame, PlaneInput, PARALLEL_PIXEL_THRESHOLD,
+    EncodedFrame, PARALLEL_PIXEL_THRESHOLD, PlaneInput, encode_frame, encode_frame_parallel,
+    encode_frame_serial, encode_frame_with_workers,
 };
 use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 

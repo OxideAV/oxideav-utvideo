@@ -27,8 +27,8 @@ use oxideav_core::{
     Result as CoreResult, RuntimeContext, TimeBase, VideoFrame, VideoPlane,
 };
 
-use crate::decoder::{decode_frame_with_workers, DecodedFrame};
-use crate::encoder::{encode_frame_with_workers, EncodedFrame, PlaneInput};
+use crate::decoder::{DecodedFrame, decode_frame_with_workers};
+use crate::encoder::{EncodedFrame, PlaneInput, encode_frame_with_workers};
 use crate::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 use crate::predict;
 

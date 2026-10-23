@@ -43,9 +43,9 @@ use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, CodecTag, Frame, PixelFormat, VideoFrame, VideoPlane,
 };
 use oxideav_utvideo::fourcc::{Fourcc, Predictor};
-use oxideav_utvideo::predict::{choose_predictor, HEURISTIC_SAMPLE_ROWS};
+use oxideav_utvideo::predict::{HEURISTIC_SAMPLE_ROWS, choose_predictor};
 use oxideav_utvideo::registry::CODEC_ID_STR;
-use oxideav_utvideo::{decode_frame, encode_frame, EncodedFrame, PlaneInput};
+use oxideav_utvideo::{EncodedFrame, PlaneInput, decode_frame, encode_frame};
 
 // ────────────────── Helpers ──────────────────
 

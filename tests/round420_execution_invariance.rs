@@ -36,7 +36,7 @@ use oxideav_utvideo::encoder::{
     encode_frame_parallel, encode_frame_serial, encode_frame_with_workers,
 };
 use oxideav_utvideo::{
-    register_codecs, EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig,
+    EncodedFrame, Extradata, Fourcc, PlaneInput, Predictor, StreamConfig, register_codecs,
 };
 
 const BUDGETS: [usize; 3] = [1, 2, 8];
@@ -54,7 +54,7 @@ struct Fixture {
 }
 
 macro_rules! fixtures {
-    ($(($name:literal, $fcc:literal, $w:expr, $h:expr, $slices:expr, $pred:ident, $pixels:literal)),* $(,)?) => {
+    ($(($name:literal, $fcc:literal, $w:expr_2021, $h:expr_2021, $slices:expr_2021, $pred:ident, $pixels:literal)),* $(,)?) => {
         &[ $(
             Fixture {
                 name: $name,
