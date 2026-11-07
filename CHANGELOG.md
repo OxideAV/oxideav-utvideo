@@ -6,6 +6,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-utvideo/compare/v0.0.4...v0.0.5) - 2026-11-07
+
+### Other
+
+- API hygiene: #[non_exhaustive] on growable enums + frame / layout records, with constructors
+
 ### Added
 
 - `new(..)` (every field, in declaration order) on `DecodedPlane`, `DecodedFrame`, `PlaneInput`, `EncodedFrame`, `Extradata`, `inspect::SliceLayout`, `inspect::PlaneLayout` and `inspect::FrameLayout` (`StreamConfig::new` already existed).
