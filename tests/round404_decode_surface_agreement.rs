@@ -68,12 +68,7 @@ const PREDICTOR_BITS: [u32; 4] = [0x0, 0x100, 0x200, 0x300];
 
 fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: u32) -> StreamConfig {
     let flags = 0x0000_0001 | ((slices - 1) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *b"YV24",
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *b"YV24", 4, flags);
     StreamConfig::new(fc, w, h, extradata).unwrap()
 }
 
@@ -103,17 +98,14 @@ fn make_valid(rng: &mut Rng) -> (StreamConfig, Vec<u8>, Vec<Vec<u8>>) {
         })
         .collect();
 
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
+    let frame = EncodedFrame::new(
+        fc,
+        w,
+        h,
         predictor,
-        num_slices: slices as usize,
-        planes: planes
-            .iter()
-            .map(|p| PlaneInput { samples: p.clone() })
-            .collect(),
-    };
+        slices as usize,
+        planes.iter().map(|p| PlaneInput::new(p.clone())).collect(),
+    );
     let payload = encode_frame(&frame).unwrap();
     (cfg, payload, planes)
 }
@@ -152,17 +144,14 @@ fn valid_streams_agree_across_all_four_surfaces() {
                 (0..pw * ph).map(|_| rng.byte()).collect()
             })
             .collect();
-        let frame = EncodedFrame {
-            fourcc: fc,
-            width: w,
-            height: h,
-            predictor: oxideav_utvideo::Predictor::Median,
-            num_slices: slices as usize,
-            planes: planes
-                .iter()
-                .map(|p| PlaneInput { samples: p.clone() })
-                .collect(),
-        };
+        let frame = EncodedFrame::new(
+            fc,
+            w,
+            h,
+            oxideav_utvideo::Predictor::Median,
+            slices as usize,
+            planes.iter().map(|p| PlaneInput::new(p.clone())).collect(),
+        );
         let payload = encode_frame(&frame).unwrap();
         assert_surfaces_agree(&cfg, &payload, &planes);
     }

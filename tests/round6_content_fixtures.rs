@@ -168,18 +168,14 @@ fn build_frame(
     for i in 0..fc.plane_count() {
         let (pw, ph) = fc.plane_dim(i, width, height);
         let seed = ((i as u64).wrapping_add(1) * 0x12345) ^ ((width as u64) * (height as u64));
-        planes.push(PlaneInput {
-            samples: fill_plane(pattern, pw as usize, ph as usize, seed),
-        });
+        planes.push(PlaneInput::new(fill_plane(
+            pattern,
+            pw as usize,
+            ph as usize,
+            seed,
+        )));
     }
-    EncodedFrame {
-        fourcc: fc,
-        width,
-        height,
-        predictor: pred,
-        num_slices,
-        planes,
-    }
+    EncodedFrame::new(fc, width, height, pred, num_slices, planes)
 }
 
 fn stream_config(fc: Fourcc, width: u32, height: u32, num_slices: usize) -> StreamConfig {

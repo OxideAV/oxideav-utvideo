@@ -67,12 +67,7 @@ fuzz_target!(|data: &[u8]| {
     let num_slices = (header[3] as u32 % 16) + 1;
     let workers = ((header[3] >> 4) as usize % 8) + 1;
     let flags = 0x0000_0001 | ((num_slices - 1) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *fourcc.as_bytes(),
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *fourcc.as_bytes(), 4, flags);
 
     let cfg = match StreamConfig::new(fourcc, width, height, extradata) {
         Ok(c) => c,

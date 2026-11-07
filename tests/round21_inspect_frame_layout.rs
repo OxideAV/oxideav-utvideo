@@ -76,18 +76,9 @@ fn build_encoded_frame(fc: Fourcc, w: u32, h: u32, slices: usize, pred: Predicto
     let mut planes = Vec::with_capacity(plane_count);
     for idx in 0..plane_count {
         let (pw, ph) = fc.plane_dim(idx, w, h);
-        planes.push(PlaneInput {
-            samples: xs_plane(idx, pw, ph),
-        });
+        planes.push(PlaneInput::new(xs_plane(idx, pw, ph)));
     }
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, pred, slices, planes);
     encode_frame(&frame).unwrap()
 }
 
@@ -300,24 +291,18 @@ fn single_symbol_flag_set_iff_descriptor_matches_sentinel() {
 
     // Case A: constant content × Predictor::None -> single-symbol on
     // every plane.
-    let frame_const = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: Predictor::None,
-        num_slices: 1,
-        planes: vec![
-            PlaneInput {
-                samples: vec![42u8; (w * h) as usize],
-            },
-            PlaneInput {
-                samples: vec![137u8; (w * h) as usize],
-            },
-            PlaneInput {
-                samples: vec![200u8; (w * h) as usize],
-            },
+    let frame_const = EncodedFrame::new(
+        fc,
+        w,
+        h,
+        Predictor::None,
+        1,
+        vec![
+            PlaneInput::new(vec![42u8; (w * h) as usize]),
+            PlaneInput::new(vec![137u8; (w * h) as usize]),
+            PlaneInput::new(vec![200u8; (w * h) as usize]),
         ],
-    };
+    );
     let bytes = encode_frame(&frame_const).unwrap();
     let layout = peek_frame(&cfg, &bytes).unwrap();
     for p in &layout.planes {

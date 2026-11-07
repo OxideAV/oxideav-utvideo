@@ -113,17 +113,10 @@ fuzz_target!(|data: &[u8]| {
         let take = expected.min(payload.len());
         samples[..take].copy_from_slice(&payload[..take]);
         payload = &payload[take..];
-        planes.push(PlaneInput { samples });
+        planes.push(PlaneInput::new(samples));
     }
 
-    let frame = EncodedFrame {
-        fourcc,
-        width,
-        height,
-        predictor,
-        num_slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fourcc, width, height, predictor, num_slices, planes);
 
     // Cache the input samples so the round-trip assertion can compare
     // bit-exactly against the decoded planes after encode_frame consumes
@@ -139,12 +132,7 @@ fuzz_target!(|data: &[u8]| {
     // encodes `num_slices - 1` and bit 0x1 enables Huffman (matching
     // `decode_utvideo`'s synthesised extradata).
     let flags = 0x0000_0001 | (((num_slices as u32) - 1) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *fourcc.as_bytes(),
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *fourcc.as_bytes(), 4, flags);
     let cfg = match StreamConfig::new(fourcc, width, height, extradata) {
         Ok(c) => c,
         Err(_) => return,

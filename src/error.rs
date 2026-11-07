@@ -9,6 +9,7 @@
 
 /// Errors produced by the decoder + encoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// `BITMAPINFOHEADER.biCompression` (or the encoder caller's
     /// FourCC argument) was not one of the five `ULRG`/`ULRA`/`ULY0`/

@@ -23,12 +23,7 @@ use oxideav_utvideo::{Error, Extradata, Fourcc, StreamConfig, decode_frame, peek
 
 /// Build a ULY4 W×H, 1-slice `StreamConfig`.
 fn cfg_uly4(w: u32, h: u32) -> StreamConfig {
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *b"YV24",
-        frame_info_size: 4,
-        flags: 0x0000_0001, // Huffman bit set, 1 slice.
-    };
+    let extradata = Extradata::new(0x0100_00f0, *b"YV24", 4, 0x0000_0001);
     StreamConfig::new(Fourcc::Uly4, w, h, extradata).unwrap()
 }
 

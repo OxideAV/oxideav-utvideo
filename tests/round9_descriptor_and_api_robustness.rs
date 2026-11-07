@@ -57,12 +57,7 @@ use oxideav_utvideo::huffman::{BitReader, BitWriter};
 
 fn cfg(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {
     let flags = 0x0000_0001 | (((slices as u32 - 1) & 0xff) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *b"YV12",
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *b"YV12", 4, flags);
     StreamConfig::new(fc, w, h, extradata).unwrap()
 }
 
@@ -88,17 +83,14 @@ fn build_frame(
     pred: Predictor,
     slices: usize,
 ) -> Vec<u8> {
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes: planes
-            .iter()
-            .map(|p| PlaneInput { samples: p.clone() })
-            .collect(),
-    };
+    let frame = EncodedFrame::new(
+        fc,
+        w,
+        h,
+        pred,
+        slices,
+        planes.iter().map(|p| PlaneInput::new(p.clone())).collect(),
+    );
     encode_frame(&frame).unwrap()
 }
 
@@ -260,24 +252,18 @@ fn single_byte_flip_in_descriptor_never_panics() {
 #[test]
 fn encoder_rejects_wrong_plane_count() {
     // ULRA needs 4 planes; pass 3.
-    let frame = EncodedFrame {
-        fourcc: Fourcc::Ulra,
-        width: 8,
-        height: 8,
-        predictor: Predictor::Left,
-        num_slices: 1,
-        planes: vec![
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
+    let frame = EncodedFrame::new(
+        Fourcc::Ulra,
+        8,
+        8,
+        Predictor::Left,
+        1,
+        vec![
+            PlaneInput::new(vec![0u8; 64]),
+            PlaneInput::new(vec![0u8; 64]),
+            PlaneInput::new(vec![0u8; 64]),
         ],
-    };
+    );
     let err = encode_frame(&frame).unwrap_err();
     assert!(
         matches!(err, Error::EncoderPlaneSizeMismatch { .. }),
@@ -290,24 +276,18 @@ fn encoder_rejects_wrong_plane_count() {
 #[test]
 fn encoder_rejects_wrong_plane_buffer_size() {
     // ULY0 8×8 expects Y=64, U=V=16. Give U only 15 bytes.
-    let frame = EncodedFrame {
-        fourcc: Fourcc::Uly0,
-        width: 8,
-        height: 8,
-        predictor: Predictor::Left,
-        num_slices: 1,
-        planes: vec![
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
-            PlaneInput {
-                samples: vec![0u8; 15],
-            }, // wrong
-            PlaneInput {
-                samples: vec![0u8; 16],
-            },
+    let frame = EncodedFrame::new(
+        Fourcc::Uly0,
+        8,
+        8,
+        Predictor::Left,
+        1,
+        vec![
+            PlaneInput::new(vec![0u8; 64]),
+            PlaneInput::new(vec![0u8; 15]), // wrong
+            PlaneInput::new(vec![0u8; 16]),
         ],
-    };
+    );
     let err = encode_frame(&frame).unwrap_err();
     assert!(
         matches!(
@@ -325,24 +305,18 @@ fn encoder_rejects_wrong_plane_buffer_size() {
 /// `num_slices == 0` on encode input is `InvalidSliceCount`.
 #[test]
 fn encoder_rejects_zero_slices() {
-    let frame = EncodedFrame {
-        fourcc: Fourcc::Uly4,
-        width: 8,
-        height: 8,
-        predictor: Predictor::Left,
-        num_slices: 0,
-        planes: vec![
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
+    let frame = EncodedFrame::new(
+        Fourcc::Uly4,
+        8,
+        8,
+        Predictor::Left,
+        0,
+        vec![
+            PlaneInput::new(vec![0u8; 64]),
+            PlaneInput::new(vec![0u8; 64]),
+            PlaneInput::new(vec![0u8; 64]),
         ],
-    };
+    );
     let err = encode_frame(&frame).unwrap_err();
     assert!(
         matches!(err, Error::InvalidSliceCount),
@@ -354,24 +328,18 @@ fn encoder_rejects_zero_slices() {
 /// formula `((flags >> 24) & 0xff) + 1` caps at 256.
 #[test]
 fn encoder_rejects_excess_slices() {
-    let frame = EncodedFrame {
-        fourcc: Fourcc::Uly4,
-        width: 8,
-        height: 8,
-        predictor: Predictor::Left,
-        num_slices: 257,
-        planes: vec![
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
-            PlaneInput {
-                samples: vec![0u8; 64],
-            },
+    let frame = EncodedFrame::new(
+        Fourcc::Uly4,
+        8,
+        8,
+        Predictor::Left,
+        257,
+        vec![
+            PlaneInput::new(vec![0u8; 64]),
+            PlaneInput::new(vec![0u8; 64]),
+            PlaneInput::new(vec![0u8; 64]),
         ],
-    };
+    );
     let err = encode_frame(&frame).unwrap_err();
     assert!(
         matches!(err, Error::InvalidSliceCount),
@@ -384,24 +352,18 @@ fn encoder_rejects_excess_slices() {
 #[test]
 fn encoder_rejects_odd_dim_uly0() {
     // ULY0 9×8: odd width.
-    let frame = EncodedFrame {
-        fourcc: Fourcc::Uly0,
-        width: 9,
-        height: 8,
-        predictor: Predictor::Left,
-        num_slices: 1,
-        planes: vec![
-            PlaneInput {
-                samples: vec![0u8; 72],
-            }, // 9*8
-            PlaneInput {
-                samples: vec![0u8; 16],
-            }, // 4*4 (floor div)
-            PlaneInput {
-                samples: vec![0u8; 16],
-            },
+    let frame = EncodedFrame::new(
+        Fourcc::Uly0,
+        9,
+        8,
+        Predictor::Left,
+        1,
+        vec![
+            PlaneInput::new(vec![0u8; 72]), // 9*8
+            PlaneInput::new(vec![0u8; 16]), // 4*4 (floor div)
+            PlaneInput::new(vec![0u8; 16]),
         ],
-    };
+    );
     let err = encode_frame(&frame).unwrap_err();
     assert!(
         matches!(err, Error::DimensionConstraint(_)),

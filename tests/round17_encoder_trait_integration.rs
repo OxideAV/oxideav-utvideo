@@ -125,9 +125,7 @@ fn build_encoded_frame_mirror(
     let planes: Vec<PlaneInput> = vf
         .planes
         .iter()
-        .map(|p| PlaneInput {
-            samples: p.data.clone(),
-        })
+        .map(|p| PlaneInput::new(p.data.clone()))
         .collect();
     // Round 18 — the trait path now picks the predictor per-frame from
     // the content of plane 0 via `predict::choose_predictor` (no more
@@ -136,14 +134,7 @@ fn build_encoded_frame_mirror(
     let (pw, ph) = fourcc.plane_dim(0, w, h);
     let predictor =
         oxideav_utvideo::predict::choose_predictor(&planes[0].samples, pw as usize, ph as usize);
-    EncodedFrame {
-        fourcc,
-        width: w,
-        height: h,
-        predictor,
-        num_slices: slices,
-        planes,
-    }
+    EncodedFrame::new(fourcc, w, h, predictor, slices, planes)
 }
 
 // ────────────────── §1. Factory happy path ──────────────────

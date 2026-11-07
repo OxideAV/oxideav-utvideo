@@ -131,9 +131,7 @@ fn planes_from_pixels(fx: &Fixture) -> Vec<PlaneInput> {
     for i in 0..fourcc.plane_count() {
         let (pw, ph) = fourcc.plane_dim(i, fx.width, fx.height);
         let n = pw as usize * ph as usize;
-        out.push(PlaneInput {
-            samples: fx.pixels[off..off + n].to_vec(),
-        });
+        out.push(PlaneInput::new(fx.pixels[off..off + n].to_vec()));
         off += n;
     }
     assert_eq!(off, fx.pixels.len(), "{}: plane split residue", fx.name);
@@ -411,14 +409,14 @@ fn solid_reference_frame_is_all_single_symbol() {
 fn encoder_round_trips_reference_pixels() {
     for fx in CORPUS {
         let cfg = config_for(fx);
-        let frame = EncodedFrame {
-            fourcc: cfg.fourcc,
-            width: fx.width,
-            height: fx.height,
-            predictor: fx.pred,
-            num_slices: fx.num_slices,
-            planes: planes_from_pixels(fx),
-        };
+        let frame = EncodedFrame::new(
+            cfg.fourcc,
+            fx.width,
+            fx.height,
+            fx.pred,
+            fx.num_slices,
+            planes_from_pixels(fx),
+        );
         let encoded =
             encode_frame(&frame).unwrap_or_else(|e| panic!("{}: re-encode failed: {e}", fx.name));
         let decoded = decode_frame(&cfg, &encoded)

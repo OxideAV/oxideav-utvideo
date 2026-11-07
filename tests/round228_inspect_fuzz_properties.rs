@@ -85,18 +85,9 @@ fn encode_frame_for(fc: Fourcc, w: u32, h: u32, slices: usize, pred: Predictor) 
     let mut planes = Vec::with_capacity(plane_count);
     for i in 0..plane_count {
         let (pw, ph) = fc.plane_dim(i, w, h);
-        planes.push(PlaneInput {
-            samples: build_plane(pw, ph, i, 0xc0de_d00d),
-        });
+        planes.push(PlaneInput::new(build_plane(pw, ph, i, 0xc0de_d00d)));
     }
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, pred, slices, planes);
     encode_frame(&frame).unwrap()
 }
 
@@ -119,12 +110,7 @@ fn synth_cfg_from_header(data: &[u8]) -> Option<(StreamConfig, &[u8])> {
     let height = ((header[2] as u32 % 64) + 2) & !1;
     let num_slices = (header[3] as u32 % 16) + 1;
     let flags = 0x0000_0001 | ((num_slices - 1) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *fourcc.as_bytes(),
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *fourcc.as_bytes(), 4, flags);
     let cfg = StreamConfig::new(fourcc, width, height, extradata).ok()?;
     Some((cfg, payload))
 }

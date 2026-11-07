@@ -70,18 +70,9 @@ fn encoded_high_entropy(fc: Fourcc, w: u32, h: u32, slices: usize, pred: Predict
     for idx in 0..plane_count {
         let (pw, ph) = fc.plane_dim(idx, w, h);
         let seed = 0x1234_5678u32 ^ (idx as u32).wrapping_mul(0x9E37_79B9);
-        planes.push(PlaneInput {
-            samples: xorshift_samples(seed, (pw * ph) as usize),
-        });
+        planes.push(PlaneInput::new(xorshift_samples(seed, (pw * ph) as usize)));
     }
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, pred, slices, planes);
     encode_frame(&frame).unwrap()
 }
 
@@ -91,20 +82,9 @@ fn encoded_constant(fc: Fourcc, w: u32, h: u32, slices: usize, values: &[u8]) ->
     let mut planes = Vec::with_capacity(plane_count);
     for (idx, &v) in values.iter().enumerate() {
         let (pw, ph) = fc.plane_dim(idx, w, h);
-        planes.push(PlaneInput {
-            samples: vec![v; (pw * ph) as usize],
-        });
+        planes.push(PlaneInput::new(vec![v; (pw * ph) as usize]));
     }
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        // Predictor::None preserves a constant residual stream and drives
-        // the `spec/05` §6.1 single-symbol path on every plane.
-        predictor: Predictor::None,
-        num_slices: slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, Predictor::None, slices, planes);
     encode_frame(&frame).unwrap()
 }
 
@@ -279,16 +259,9 @@ fn single_length_descriptor_is_one_tier() {
                 samples.push(v);
             }
         }
-        planes.push(PlaneInput { samples });
+        planes.push(PlaneInput::new(samples));
     }
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: Predictor::None,
-        num_slices: 1,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, Predictor::None, 1, planes);
     let bytes = encode_frame(&frame).unwrap();
     let layout = peek_frame(&cfg, &bytes).unwrap();
     for p in &layout.planes {

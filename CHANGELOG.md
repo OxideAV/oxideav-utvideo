@@ -6,6 +6,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `new(..)` (every field, in declaration order) on `DecodedPlane`, `DecodedFrame`, `PlaneInput`, `EncodedFrame`, `Extradata`, `inspect::SliceLayout`, `inspect::PlaneLayout` and `inspect::FrameLayout` (`StreamConfig::new` already existed).
+
+### Changed
+
+- `#[non_exhaustive]` on the growable enums `Error`, `Fourcc` and `PlaneLabel`, and on the records `DecodedPlane`, `DecodedFrame`, `PlaneInput`, `EncodedFrame`, `Extradata`, `StreamConfig`, `inspect::SliceLayout`, `inspect::PlaneLayout`, `inspect::FrameLayout`. `Predictor` (the two-bit `frame_info` field) stays exhaustive.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-utvideo/compare/v0.0.3...v0.0.4) - 2026-10-23
 
 ### Added

@@ -60,18 +60,9 @@ fn encoded_high_entropy(fc: Fourcc, w: u32, h: u32, slices: usize, pred: Predict
     for idx in 0..plane_count {
         let (pw, ph) = fc.plane_dim(idx, w, h);
         let seed = 0x1234_5678u32 ^ (idx as u32).wrapping_mul(0x9E37_79B9);
-        planes.push(PlaneInput {
-            samples: xorshift_samples(seed, (pw * ph) as usize),
-        });
+        planes.push(PlaneInput::new(xorshift_samples(seed, (pw * ph) as usize)));
     }
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, pred, slices, planes);
     encode_frame(&frame).unwrap()
 }
 

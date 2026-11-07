@@ -72,17 +72,10 @@ fn drive(data: &[u8]) {
         let take = expected.min(payload.len());
         samples[..take].copy_from_slice(&payload[..take]);
         payload = &payload[take..];
-        planes.push(PlaneInput { samples });
+        planes.push(PlaneInput::new(samples));
     }
 
-    let frame = EncodedFrame {
-        fourcc,
-        width,
-        height,
-        predictor,
-        num_slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fourcc, width, height, predictor, num_slices, planes);
     let inputs: Vec<Vec<u8>> = frame.planes.iter().map(|p| p.samples.clone()).collect();
 
     let encoded = match encode_frame(&frame) {
@@ -91,12 +84,7 @@ fn drive(data: &[u8]) {
     };
 
     let flags = 0x0000_0001 | (((num_slices as u32) - 1) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *fourcc.as_bytes(),
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *fourcc.as_bytes(), 4, flags);
     let cfg = match StreamConfig::new(fourcc, width, height, extradata) {
         Ok(c) => c,
         Err(_) => return,

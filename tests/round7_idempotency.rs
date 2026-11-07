@@ -140,16 +140,9 @@ fn random_frame(
         let n = (pw as usize) * (ph as usize);
         let mut rng = Xorshift64::new(seed.wrapping_add((i as u64 + 1) * 0x9E37_79B9));
         let samples: Vec<u8> = (0..n).map(|_| rng.next_byte() & mask).collect();
-        planes.push(PlaneInput { samples });
+        planes.push(PlaneInput::new(samples));
     }
-    EncodedFrame {
-        fourcc: fc,
-        width,
-        height,
-        predictor: pred,
-        num_slices,
-        planes,
-    }
+    EncodedFrame::new(fc, width, height, pred, num_slices, planes)
 }
 
 /// Re-wrap a decoded frame back into encoder input. The decoder emits
@@ -158,20 +151,18 @@ fn random_frame(
 /// re-applies forward decorrelation internally) — so the planes map
 /// straight across by index.
 fn frame_from_decoded(decoded: &DecodedFrame, num_slices: usize) -> EncodedFrame {
-    EncodedFrame {
-        fourcc: decoded.fourcc,
-        width: decoded.width,
-        height: decoded.height,
-        predictor: decoded.predictor,
+    EncodedFrame::new(
+        decoded.fourcc,
+        decoded.width,
+        decoded.height,
+        decoded.predictor,
         num_slices,
-        planes: decoded
+        decoded
             .planes
             .iter()
-            .map(|p| PlaneInput {
-                samples: p.samples.clone(),
-            })
+            .map(|p| PlaneInput::new(p.samples.clone()))
             .collect(),
-    }
+    )
 }
 
 /// Assert the decoded planes equal the source frame's planes byte-exact.

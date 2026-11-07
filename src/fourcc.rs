@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 /// `spec/01` §2. Drives plane count, plane layout, and chroma
 /// subsampling for everything downstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Fourcc {
     /// `ULY0` — YUV 4:2:0 planar (Y, U, V; chroma half W and half H).
     Uly0,
@@ -183,6 +184,7 @@ impl Predictor {
 
 /// Decoded view of the 16-byte extradata block per `spec/01` §4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Extradata {
     /// `+0x00`: encoder version (LE u32). Inspected for diagnostics
     /// only; do not reject.
@@ -196,6 +198,23 @@ pub struct Extradata {
     /// `+0x0c`: encoding flags — Huffman bit, interlaced bit, slice
     /// count high byte.
     pub flags: u32,
+}
+
+impl Extradata {
+    /// Build `Extradata` from every field, in declaration order.
+    pub fn new(
+        encoder_version: u32,
+        source_format_tag: [u8; 4],
+        frame_info_size: u32,
+        flags: u32,
+    ) -> Self {
+        Self {
+            encoder_version,
+            source_format_tag,
+            frame_info_size,
+            flags,
+        }
+    }
 }
 
 impl Extradata {
@@ -286,6 +305,7 @@ impl Extradata {
 /// the FourCC + extradata together. This is what the codec layer
 /// hands the per-frame decoder; no AVI bytes appear here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StreamConfig {
     pub fourcc: Fourcc,
     pub width: u32,

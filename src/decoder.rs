@@ -59,6 +59,7 @@ pub const PARALLEL_PIXEL_THRESHOLD: usize = 64 * 1024;
 /// One decoded plane: width × height in `samples`, plus the symbolic
 /// label for the plane (Y, U, V, G, B, R, A) for the FOURCC.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DecodedPlane {
     pub label: PlaneLabel,
     pub width: u32,
@@ -66,9 +67,22 @@ pub struct DecodedPlane {
     pub samples: Vec<u8>,
 }
 
+impl DecodedPlane {
+    /// Build `DecodedPlane` from every field, in declaration order.
+    pub fn new(label: PlaneLabel, width: u32, height: u32, samples: Vec<u8>) -> Self {
+        Self {
+            label,
+            width,
+            height,
+            samples,
+        }
+    }
+}
+
 /// Symbolic plane labels; reflect on-wire order, not BGR/RGB display
 /// order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PlaneLabel {
     Y,
     U,
@@ -104,6 +118,7 @@ impl PlaneLabel {
 
 /// Output of a successful frame decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DecodedFrame {
     pub fourcc: Fourcc,
     pub width: u32,
@@ -114,6 +129,27 @@ pub struct DecodedFrame {
     /// prediction-mode bits have already been folded into `predictor`;
     /// other bits surface here for diagnostics.
     pub frame_info: u32,
+}
+
+impl DecodedFrame {
+    /// Build `DecodedFrame` from every field, in declaration order.
+    pub fn new(
+        fourcc: Fourcc,
+        width: u32,
+        height: u32,
+        predictor: Predictor,
+        planes: Vec<DecodedPlane>,
+        frame_info: u32,
+    ) -> Self {
+        Self {
+            fourcc,
+            width,
+            height,
+            predictor,
+            planes,
+            frame_info,
+        }
+    }
 }
 
 /// Decode one Ut Video frame given its `00dc` chunk payload bytes

@@ -57,18 +57,12 @@ fn build_frame(fc: Fourcc, w: u32, h: u32, pred: Predictor, num_slices: usize) -
     for i in 0..fc.plane_count() {
         let (pw, ph) = fc.plane_dim(i, w, h);
         seed = seed.wrapping_add(0x9E37_79B9);
-        planes.push(PlaneInput {
-            samples: xorshift_buf(seed, (pw as usize) * (ph as usize)),
-        });
+        planes.push(PlaneInput::new(xorshift_buf(
+            seed,
+            (pw as usize) * (ph as usize),
+        )));
     }
-    EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices,
-        planes,
-    }
+    EncodedFrame::new(fc, w, h, pred, num_slices, planes)
 }
 
 fn roundtrip(fc: Fourcc, w: u32, h: u32, pred: Predictor, num_slices: usize) -> DecodedFrame {
@@ -184,24 +178,18 @@ fn left_constant_zero_plane_residual_signature() {
     let h = 16u32;
     let cfg = cfg_for(fc, w, h, 1);
     let zero_plane = vec![0u8; (w * h) as usize];
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: Predictor::Left,
-        num_slices: 1,
-        planes: vec![
-            PlaneInput {
-                samples: zero_plane.clone(),
-            },
-            PlaneInput {
-                samples: zero_plane.clone(),
-            },
-            PlaneInput {
-                samples: zero_plane.clone(),
-            },
+    let frame = EncodedFrame::new(
+        fc,
+        w,
+        h,
+        Predictor::Left,
+        1,
+        vec![
+            PlaneInput::new(zero_plane.clone()),
+            PlaneInput::new(zero_plane.clone()),
+            PlaneInput::new(zero_plane.clone()),
         ],
-    };
+    );
     let bytes = encode_frame(&frame).unwrap();
     let decoded = decode_frame(&cfg, &bytes).unwrap();
     for plane in &decoded.planes {
@@ -224,24 +212,18 @@ fn left_constant_value_plane_decodes_back() {
     let cfg = cfg_for(fc, w, h, 1);
     for &v in &[1u8, 64, 127, 128, 200, 255] {
         let plane = vec![v; (w * h) as usize];
-        let frame = EncodedFrame {
-            fourcc: fc,
-            width: w,
-            height: h,
-            predictor: Predictor::Left,
-            num_slices: 1,
-            planes: vec![
-                PlaneInput {
-                    samples: plane.clone(),
-                },
-                PlaneInput {
-                    samples: plane.clone(),
-                },
-                PlaneInput {
-                    samples: plane.clone(),
-                },
+        let frame = EncodedFrame::new(
+            fc,
+            w,
+            h,
+            Predictor::Left,
+            1,
+            vec![
+                PlaneInput::new(plane.clone()),
+                PlaneInput::new(plane.clone()),
+                PlaneInput::new(plane.clone()),
             ],
-        };
+        );
         let bytes = encode_frame(&frame).unwrap();
         let decoded = decode_frame(&cfg, &bytes).unwrap();
         for p in &decoded.planes {
@@ -304,24 +286,18 @@ fn left_continuous_wrap_across_rows_verifies_per_slice_state() {
     let plane: Vec<u8> = (0..h)
         .flat_map(|r| std::iter::repeat_n(((r * 7) & 0xff) as u8, w as usize))
         .collect();
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: Predictor::Left,
-        num_slices: 1,
-        planes: vec![
-            PlaneInput {
-                samples: plane.clone(),
-            },
-            PlaneInput {
-                samples: plane.clone(),
-            },
-            PlaneInput {
-                samples: plane.clone(),
-            },
+    let frame = EncodedFrame::new(
+        fc,
+        w,
+        h,
+        Predictor::Left,
+        1,
+        vec![
+            PlaneInput::new(plane.clone()),
+            PlaneInput::new(plane.clone()),
+            PlaneInput::new(plane.clone()),
         ],
-    };
+    );
     let bytes = encode_frame(&frame).unwrap();
     let decoded = decode_frame(&cfg, &bytes).unwrap();
     for p in &decoded.planes {
@@ -462,24 +438,18 @@ fn all_four_predictors_round_trip_same_input() {
         Predictor::Gradient,
         Predictor::Median,
     ] {
-        let frame = EncodedFrame {
-            fourcc: fc,
-            width: w,
-            height: h,
-            predictor: pred,
-            num_slices: 1,
-            planes: vec![
-                PlaneInput {
-                    samples: plane.clone(),
-                },
-                PlaneInput {
-                    samples: plane.clone(),
-                },
-                PlaneInput {
-                    samples: plane.clone(),
-                },
+        let frame = EncodedFrame::new(
+            fc,
+            w,
+            h,
+            pred,
+            1,
+            vec![
+                PlaneInput::new(plane.clone()),
+                PlaneInput::new(plane.clone()),
+                PlaneInput::new(plane.clone()),
             ],
-        };
+        );
         let bytes = encode_frame(&frame).unwrap();
         let decoded = decode_frame(&cfg, &bytes).unwrap();
         for p in &decoded.planes {

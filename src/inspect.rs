@@ -77,6 +77,7 @@ use crate::fourcc::{Predictor, StreamConfig};
 /// residual bytes, including the trailing pad bits the bit reader
 /// consumes from the word-aligned slice tail per `spec/05` §4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SliceLayout {
     /// Absolute byte offset of this slice's first bit-stream byte.
     pub start: usize,
@@ -98,6 +99,19 @@ pub struct SliceLayout {
     /// [`crate::huffman::HuffmanTable::decode_slice`] (`spec/05` §6,
     /// behavioural pseudocode).
     pub pixel_count: u32,
+}
+
+impl SliceLayout {
+    /// Build `SliceLayout` from every field, in declaration order.
+    pub fn new(start: usize, end: usize, row_start: u32, row_end: u32, pixel_count: u32) -> Self {
+        Self {
+            start,
+            end,
+            row_start,
+            row_end,
+            pixel_count,
+        }
+    }
 }
 
 impl SliceLayout {
@@ -134,6 +148,7 @@ impl SliceLayout {
 ///
 /// where `slice_data_total = slices[num_slices - 1].end - slice_data_start`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PlaneLayout {
     /// Wire-format plane index (0..plane_count). Plane 0 is the luma
     /// plane (YUV) or G plane (RGB[A]) per `spec/02` §3.
@@ -363,6 +378,42 @@ pub struct PlaneLayout {
 }
 
 impl PlaneLayout {
+    /// Build `PlaneLayout` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        plane_idx: usize,
+        width: u32,
+        height: u32,
+        descriptor_start: usize,
+        end_offsets_start: usize,
+        slice_data_start: usize,
+        slices: Vec<SliceLayout>,
+        is_single_symbol: bool,
+        active_symbol_count: u32,
+        max_code_length: u8,
+        min_code_length: u8,
+        min_code_length_symbol_count: u32,
+        code_length_histogram: Vec<(u8, u32)>,
+    ) -> Self {
+        Self {
+            plane_idx,
+            width,
+            height,
+            descriptor_start,
+            end_offsets_start,
+            slice_data_start,
+            slices,
+            is_single_symbol,
+            active_symbol_count,
+            max_code_length,
+            min_code_length,
+            min_code_length_symbol_count,
+            code_length_histogram,
+        }
+    }
+}
+
+impl PlaneLayout {
     /// Total wire bytes occupied by this plane:
     /// `256 + 4 * num_slices + slice_data_total`.
     pub fn total_size(&self) -> usize {
@@ -581,6 +632,7 @@ impl PlaneLayout {
 /// the trailing `frame_info` dword, and the predictor decoded from
 /// bits 8..9 of `frame_info`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FrameLayout {
     /// Per-plane wire extents in on-wire plane order (`spec/02` §3).
     pub planes: Vec<PlaneLayout>,
@@ -593,6 +645,23 @@ pub struct FrameLayout {
     /// Number of slices per plane (from `cfg`, surfaced here for
     /// convenience).
     pub num_slices: usize,
+}
+
+impl FrameLayout {
+    /// Build `FrameLayout` from every field, in declaration order.
+    pub fn new(
+        planes: Vec<PlaneLayout>,
+        frame_info: u32,
+        predictor: Predictor,
+        num_slices: usize,
+    ) -> Self {
+        Self {
+            planes,
+            frame_info,
+            predictor,
+            num_slices,
+        }
+    }
 }
 
 impl FrameLayout {

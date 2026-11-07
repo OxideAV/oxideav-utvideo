@@ -43,16 +43,9 @@ fn xorshift_frame(fc: Fourcc, w: u32, h: u32, slices: usize, pred: Predictor) ->
             state ^= state << 5;
             samples.push((state & 0xff) as u8);
         }
-        planes.push(PlaneInput { samples });
+        planes.push(PlaneInput::new(samples));
     }
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, pred, slices, planes);
     encode_frame(&frame).unwrap()
 }
 

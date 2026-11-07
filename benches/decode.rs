@@ -80,19 +80,10 @@ fn synth_encoded_frame(
     let planes: Vec<PlaneInput> = (0..plane_count)
         .map(|p| {
             let (pw, ph) = fc.plane_dim(p, w, h);
-            PlaneInput {
-                samples: build_plane(pw as usize, ph as usize, p),
-            }
+            PlaneInput::new(build_plane(pw as usize, ph as usize, p))
         })
         .collect();
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, pred, num_slices, planes);
     let bytes = encode_frame(&frame).expect("encode_frame");
     (cfg, bytes)
 }

@@ -59,12 +59,21 @@ pub const PARALLEL_PIXEL_THRESHOLD: usize = 64 * 1024;
 /// One plane's caller-provided pixel samples. The plane's expected
 /// dimensions are derived from the FOURCC + frame size.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PlaneInput {
     pub samples: Vec<u8>,
 }
 
+impl PlaneInput {
+    /// Build `PlaneInput` from every field, in declaration order.
+    pub fn new(samples: Vec<u8>) -> Self {
+        Self { samples }
+    }
+}
+
 /// Encoder input describing one frame.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EncodedFrame {
     pub fourcc: Fourcc,
     pub width: u32,
@@ -72,6 +81,27 @@ pub struct EncodedFrame {
     pub predictor: Predictor,
     pub num_slices: usize,
     pub planes: Vec<PlaneInput>,
+}
+
+impl EncodedFrame {
+    /// Build `EncodedFrame` from every field, in declaration order.
+    pub fn new(
+        fourcc: Fourcc,
+        width: u32,
+        height: u32,
+        predictor: Predictor,
+        num_slices: usize,
+        planes: Vec<PlaneInput>,
+    ) -> Self {
+        Self {
+            fourcc,
+            width,
+            height,
+            predictor,
+            num_slices,
+            planes,
+        }
+    }
 }
 
 /// Encode one classic-family frame. Returns the chunk payload bytes

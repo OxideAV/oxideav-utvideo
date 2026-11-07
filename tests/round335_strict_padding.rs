@@ -43,12 +43,7 @@ use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 
 fn cfg(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {
     let flags = 0x0000_0001 | (((slices as u32 - 1) & 0xff) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *b"YV12",
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *b"YV12", 4, flags);
     StreamConfig::new(fc, w, h, extradata).unwrap()
 }
 
@@ -73,6 +68,7 @@ fn plane_sizes(fc: Fourcc, w: usize, h: usize) -> Vec<usize> {
         Fourcc::Uly0 => vec![w * h, (w / 2) * (h / 2), (w / 2) * (h / 2)],
         Fourcc::Ulrg => vec![w * h; 3],
         Fourcc::Ulra => vec![w * h; 4],
+        _ => unreachable!("FourCC outside this test's matrix"),
     }
 }
 
@@ -81,18 +77,9 @@ fn build_frame(fc: Fourcc, w: u32, h: u32, pred: Predictor, slices: usize) -> Ve
     let planes: Vec<PlaneInput> = sizes
         .iter()
         .enumerate()
-        .map(|(i, &n)| PlaneInput {
-            samples: noise_plane(0x11 + i as u64, n),
-        })
+        .map(|(i, &n)| PlaneInput::new(noise_plane(0x11 + i as u64, n)))
         .collect();
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes,
-    };
+    let frame = EncodedFrame::new(fc, w, h, pred, slices, planes);
     encode_frame(&frame).unwrap()
 }
 

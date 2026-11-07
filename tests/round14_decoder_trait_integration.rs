@@ -99,17 +99,10 @@ fn encoded_frame(fc: Fourcc, w: u32, h: u32, slices: usize, pred: Predictor) -> 
                 // pairing (alpha treated as luma etc.) trips a diff.
                 samples.push(((i + (idx + 1) * 7) & 0xff) as u8);
             }
-            PlaneInput { samples }
+            PlaneInput::new(samples)
         })
         .collect();
-    EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes,
-    }
+    EncodedFrame::new(fc, w, h, pred, slices, planes)
 }
 
 fn cfg(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {

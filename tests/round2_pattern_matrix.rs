@@ -110,26 +110,19 @@ fn build_planes(fc: Fourcc, w: u32, h: u32, p: Pattern) -> Vec<PlaneInput> {
     (0..fc.plane_count())
         .map(|i| {
             let (pw, ph) = fc.plane_dim(i, w, h);
-            PlaneInput {
-                samples: fill_plane(
-                    p,
-                    pw as usize,
-                    ph as usize,
-                    (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
-                ),
-            }
+            PlaneInput::new(fill_plane(
+                p,
+                pw as usize,
+                ph as usize,
+                (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            ))
         })
         .collect()
 }
 
 fn cfg_for(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {
     let flags = 0x0000_0001 | (((slices as u32 - 1) & 0xff) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *b"YV12",
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *b"YV12", 4, flags);
     StreamConfig::new(fc, w, h, extradata).unwrap()
 }
 
@@ -143,6 +136,7 @@ fn dims_legal(fc: Fourcc, w: u32, h: u32) -> bool {
         Fourcc::Uly0 => w.is_multiple_of(2) && h.is_multiple_of(2),
         Fourcc::Uly2 => w.is_multiple_of(2),
         Fourcc::Uly4 | Fourcc::Ulrg | Fourcc::Ulra => true,
+        _ => unreachable!("FourCC outside this test's matrix"),
     }
 }
 
@@ -166,14 +160,7 @@ fn slices_legal(fc: Fourcc, _w: u32, h: u32, num_slices: usize) -> bool {
 fn run_one(fc: Fourcc, w: u32, h: u32, p: Pattern, predictor: Predictor, slices: usize) {
     let planes = build_planes(fc, w, h, p);
     let cfg = cfg_for(fc, w, h, slices);
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor,
-        num_slices: slices,
-        planes: planes.clone(),
-    };
+    let frame = EncodedFrame::new(fc, w, h, predictor, slices, planes.clone());
     let bytes = encode_frame(&frame).unwrap_or_else(|e| {
         panic!("encode_frame failed FourCC={fc:?} {w}x{h} {p:?} {predictor:?} slices={slices}: {e}")
     });
@@ -389,19 +376,19 @@ fn probe_ulra_alpha_independent() {
         let r = fill_plane(Pattern::RampY, w as usize, h as usize, 2);
         let a = fill_plane(Pattern::Checker, w as usize, h as usize, 3);
         let cfg = cfg_for(Fourcc::Ulra, w, h, 1);
-        let frame = EncodedFrame {
-            fourcc: Fourcc::Ulra,
-            width: w,
-            height: h,
-            predictor: pred,
-            num_slices: 1,
-            planes: vec![
-                PlaneInput { samples: g.clone() },
-                PlaneInput { samples: b.clone() },
-                PlaneInput { samples: r.clone() },
-                PlaneInput { samples: a.clone() },
+        let frame = EncodedFrame::new(
+            Fourcc::Ulra,
+            w,
+            h,
+            pred,
+            1,
+            vec![
+                PlaneInput::new(g.clone()),
+                PlaneInput::new(b.clone()),
+                PlaneInput::new(r.clone()),
+                PlaneInput::new(a.clone()),
             ],
-        };
+        );
         let bytes = encode_frame(&frame).unwrap();
         let decoded = decode_frame(&cfg, &bytes).unwrap();
         assert_eq!(decoded.planes[0].samples, g, "G mismatch under {pred:?}");
@@ -427,19 +414,10 @@ fn probe_solid_colours_all_fourccs() {
                 let mut planes: Vec<PlaneInput> = Vec::new();
                 for i in 0..fc.plane_count() {
                     let (pw, ph) = fc.plane_dim(i, 16, 16);
-                    planes.push(PlaneInput {
-                        samples: vec![val; (pw as usize) * (ph as usize)],
-                    });
+                    planes.push(PlaneInput::new(vec![val; (pw as usize) * (ph as usize)]));
                 }
                 let cfg = cfg_for(fc, 16, 16, 1);
-                let frame = EncodedFrame {
-                    fourcc: fc,
-                    width: 16,
-                    height: 16,
-                    predictor: pred,
-                    num_slices: 1,
-                    planes: planes.clone(),
-                };
+                let frame = EncodedFrame::new(fc, 16, 16, pred, 1, planes.clone());
                 let bytes = encode_frame(&frame).unwrap();
                 let decoded = decode_frame(&cfg, &bytes).unwrap();
                 for (i, want) in planes.iter().enumerate() {
@@ -470,19 +448,10 @@ fn probe_two_symbol_descriptor() {
     // unit test, but at the public-API level here.)
     for &pred in &[Predictor::None, Predictor::Left] {
         let planes: Vec<PlaneInput> = (0..3)
-            .map(|_| PlaneInput {
-                samples: vec![0u8; 64 * 64],
-            })
+            .map(|_| PlaneInput::new(vec![0u8; 64 * 64]))
             .collect();
         let cfg = cfg_for(Fourcc::Uly4, 64, 64, 1);
-        let frame = EncodedFrame {
-            fourcc: Fourcc::Uly4,
-            width: 64,
-            height: 64,
-            predictor: pred,
-            num_slices: 1,
-            planes: planes.clone(),
-        };
+        let frame = EncodedFrame::new(Fourcc::Uly4, 64, 64, pred, 1, planes.clone());
         let bytes = encode_frame(&frame).unwrap();
         let decoded = decode_frame(&cfg, &bytes).unwrap();
         for (i, want) in planes.iter().enumerate() {
@@ -519,30 +488,21 @@ fn double_roundtrip_bytes_stable() {
                 }
                 let planes = build_planes(fc, w, h, Pattern::Random(0xee));
                 let cfg = cfg_for(fc, w, h, slices);
-                let frame = EncodedFrame {
-                    fourcc: fc,
-                    width: w,
-                    height: h,
-                    predictor: pred,
-                    num_slices: slices,
-                    planes: planes.clone(),
-                };
+                let frame = EncodedFrame::new(fc, w, h, pred, slices, planes.clone());
                 let bytes1 = encode_frame(&frame).unwrap();
                 let decoded = decode_frame(&cfg, &bytes1).unwrap();
-                let frame2 = EncodedFrame {
-                    fourcc: fc,
-                    width: w,
-                    height: h,
-                    predictor: pred,
-                    num_slices: slices,
-                    planes: decoded
+                let frame2 = EncodedFrame::new(
+                    fc,
+                    w,
+                    h,
+                    pred,
+                    slices,
+                    decoded
                         .planes
                         .iter()
-                        .map(|p| PlaneInput {
-                            samples: p.samples.clone(),
-                        })
+                        .map(|p| PlaneInput::new(p.samples.clone()))
                         .collect(),
-                };
+                );
                 let bytes2 = encode_frame(&frame2).unwrap();
                 assert_eq!(
                     bytes1, bytes2,

@@ -44,12 +44,7 @@ use oxideav_utvideo::fourcc::{Extradata, Fourcc, Predictor, StreamConfig};
 
 fn cfg(fc: Fourcc, w: u32, h: u32, slices: usize) -> StreamConfig {
     let flags = 0x0000_0001 | (((slices as u32 - 1) & 0xff) << 24);
-    let extradata = Extradata {
-        encoder_version: 0x0100_00f0,
-        source_format_tag: *b"YV12",
-        frame_info_size: 4,
-        flags,
-    };
+    let extradata = Extradata::new(0x0100_00f0, *b"YV12", 4, flags);
     StreamConfig::new(fc, w, h, extradata).unwrap()
 }
 
@@ -75,17 +70,14 @@ fn build_frame(
     pred: Predictor,
     slices: usize,
 ) -> Vec<u8> {
-    let frame = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices: slices,
-        planes: planes
-            .iter()
-            .map(|p| PlaneInput { samples: p.clone() })
-            .collect(),
-    };
+    let frame = EncodedFrame::new(
+        fc,
+        w,
+        h,
+        pred,
+        slices,
+        planes.iter().map(|p| PlaneInput::new(p.clone())).collect(),
+    );
     encode_frame(&frame).unwrap()
 }
 

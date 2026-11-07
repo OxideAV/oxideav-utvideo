@@ -54,19 +54,10 @@ fn make_frame(fc: Fourcc, w: u32, h: u32, num_slices: usize, pred: Predictor) ->
     let planes: Vec<PlaneInput> = (0..plane_count)
         .map(|p| {
             let (pw, ph) = fc.plane_dim(p, w, h);
-            PlaneInput {
-                samples: build_plane(pw as usize, ph as usize, p),
-            }
+            PlaneInput::new(build_plane(pw as usize, ph as usize, p))
         })
         .collect();
-    EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: pred,
-        num_slices,
-        planes,
-    }
+    EncodedFrame::new(fc, w, h, pred, num_slices, planes)
 }
 
 fn bench_encode_ulrg_1080p_single(c: &mut Criterion) {

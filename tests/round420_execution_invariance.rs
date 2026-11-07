@@ -326,17 +326,14 @@ fn direct_decode_is_invariant_across_budgets() {
 fn direct_encode_is_invariant_across_budgets() {
     for fx in CORPUS {
         let cfg = config_for(fx);
-        let frame = EncodedFrame {
-            fourcc: cfg.fourcc,
-            width: fx.width,
-            height: fx.height,
-            predictor: fx.pred,
-            num_slices: fx.num_slices,
-            planes: plane_bufs(fx)
-                .into_iter()
-                .map(|samples| PlaneInput { samples })
-                .collect(),
-        };
+        let frame = EncodedFrame::new(
+            cfg.fourcc,
+            fx.width,
+            fx.height,
+            fx.pred,
+            fx.num_slices,
+            plane_bufs(fx).into_iter().map(PlaneInput::new).collect(),
+        );
         let baseline = encode_frame_serial(&frame)
             .unwrap_or_else(|e| panic!("{}: serial encode: {e}", fx.name));
         for workers in BUDGETS {

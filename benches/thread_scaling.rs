@@ -55,19 +55,10 @@ fn make_frame() -> EncodedFrame {
     let planes: Vec<PlaneInput> = (0..fc.plane_count())
         .map(|p| {
             let (pw, ph) = fc.plane_dim(p, WIDTH, HEIGHT);
-            PlaneInput {
-                samples: build_plane(pw as usize, ph as usize, p),
-            }
+            PlaneInput::new(build_plane(pw as usize, ph as usize, p))
         })
         .collect();
-    EncodedFrame {
-        fourcc: fc,
-        width: WIDTH,
-        height: HEIGHT,
-        predictor: Predictor::Gradient,
-        num_slices: NUM_SLICES,
-        planes,
-    }
+    EncodedFrame::new(fc, WIDTH, HEIGHT, Predictor::Gradient, NUM_SLICES, planes)
 }
 
 /// Budget sweep: 1 / 2 / 4 / host-max (deduplicated and sorted so the

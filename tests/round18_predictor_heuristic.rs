@@ -482,30 +482,16 @@ fn direct_api_still_accepts_explicit_predictor() {
         build_planes_for_pattern(fc, w, h, |_pl, r, c| ((r + c) & 0xff) as u8);
     let planes: Vec<PlaneInput> = planes_vec
         .iter()
-        .map(|s| PlaneInput { samples: s.clone() })
+        .map(|s| PlaneInput::new(s.clone()))
         .collect();
     // The linear-ramp pattern: heuristic picks Gradient (smallest
     // entropy). Force Predictor::None on the direct API and verify
     // the bytes are different from a heuristic-driven trait encode.
-    let efr = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: Predictor::None,
-        num_slices: 1,
-        planes: planes.clone(),
-    };
+    let efr = EncodedFrame::new(fc, w, h, Predictor::None, 1, planes.clone());
     let bytes_none = encode_frame(&efr).unwrap();
 
     // Same content under Gradient.
-    let efr_grad = EncodedFrame {
-        fourcc: fc,
-        width: w,
-        height: h,
-        predictor: Predictor::Gradient,
-        num_slices: 1,
-        planes,
-    };
+    let efr_grad = EncodedFrame::new(fc, w, h, Predictor::Gradient, 1, planes);
     let bytes_grad = encode_frame(&efr_grad).unwrap();
     assert_ne!(
         bytes_none, bytes_grad,
