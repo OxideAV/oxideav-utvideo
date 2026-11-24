@@ -66,6 +66,61 @@ The trait-path encoder picks a predictor per frame with a
 content-adaptive entropy heuristic; the direct API takes an explicit
 predictor.
 
+## Performance
+
+Single thread, 1920×1080, one slice, Apple-silicon laptop shared with
+other jobs. `cargo bench --bench families` times every FourCC ×
+predictor (15 runs each, fastest run reported); "before" is the
+previous release of this crate under the same harness, the two builds
+run alternately and the better of two passes taken for each. MB/s is
+raw sample bytes per second. Output is byte-identical before and after
+(encoder: 1 200 frames compared; decoder: the black-box matrix).
+
+| FourCC | predictor | decode before → after | MB/s | encode before → after | MB/s |
+| ------ | --------- | --------------------- | ---- | --------------------- | ---- |
+| ULY0 | none | 3.7 → **2.5 ms** (1.48×) | 1255 | 6.6 → **3.5 ms** (1.90×) | 895 |
+| ULY0 | left | 8.5 → **4.6 ms** (1.85×) | 677 | 13.6 → **3.1 ms** (4.33×) | 990 |
+| ULY0 | gradient | 9.7 → **7.0 ms** (1.40×) | 447 | 13.3 → **3.1 ms** (4.37×) | 1017 |
+| ULY0 | median | 12.9 → **8.9 ms** (1.44×) | 348 | 14.1 → **3.1 ms** (4.63×) | 1017 |
+| ULY2 | none | 5.3 → **3.2 ms** (1.68×) | 1306 | 10.3 → **4.3 ms** (2.39×) | 963 |
+| ULY2 | left | 13.1 → **6.9 ms** (1.91×) | 603 | 20.2 → **4.1 ms** (4.91×) | 1007 |
+| ULY2 | gradient | 14.3 → **9.4 ms** (1.52×) | 442 | 19.4 → **4.4 ms** (4.44×) | 950 |
+| ULY2 | median | 19.9 → **13.0 ms** (1.53×) | 319 | 19.4 → **4.4 ms** (4.42×) | 943 |
+| ULY4 | none | 7.9 → **5.2 ms** (1.53×) | 1199 | 15.2 → **7.0 ms** (2.16×) | 883 |
+| ULY4 | left | 18.5 → **10.8 ms** (1.71×) | 575 | 27.1 → **6.7 ms** (4.04×) | 926 |
+| ULY4 | gradient | 19.5 → **14.0 ms** (1.39×) | 445 | 26.8 → **6.8 ms** (3.94×) | 915 |
+| ULY4 | median | 26.9 → **18.6 ms** (1.44×) | 334 | 26.5 → **6.5 ms** (4.05×) | 951 |
+| ULRG | none | 13.0 → **7.7 ms** (1.68×) | 806 | 23.7 → **6.8 ms** (3.47×) | 908 |
+| ULRG | left | 17.2 → **11.2 ms** (1.54×) | 557 | 26.1 → **6.9 ms** (3.78×) | 901 |
+| ULRG | gradient | 21.5 → **15.5 ms** (1.39×) | 402 | 28.5 → **7.1 ms** (4.03×) | 879 |
+| ULRG | median | 26.4 → **19.5 ms** (1.35×) | 319 | 28.4 → **6.6 ms** (4.28×) | 939 |
+| ULRA | none | 17.6 → **9.1 ms** (1.94×) | 916 | 30.1 → **8.9 ms** (3.38×) | 931 |
+| ULRA | left | 26.0 → **14.1 ms** (1.84×) | 588 | 40.4 → **8.7 ms** (4.63×) | 950 |
+| ULRA | gradient | 32.8 → **19.5 ms** (1.68×) | 425 | 41.2 → **9.1 ms** (4.53×) | 913 |
+| ULRA | median | 43.1 → **25.1 ms** (1.72×) | 330 | 40.7 → **8.7 ms** (4.70×) | 957 |
+| ULY4 | none, noise | 8.8 → **4.8 ms** (1.84×) | 1303 | 15.7 → **6.5 ms** (2.43×) | 962 |
+| ULY4 | none, skewed | 18.8 → **7.6 ms** (2.48×) | 820 | 37.9 → **6.2 ms** (6.16×) | 1010 |
+
+"natural" is a smooth ramp plus four bits of noise; "noise" is uniform
+random bytes (a flat 8-bit code); "skewed" is a geometric symbol
+distribution whose code reaches the encoder's 16-bit cap.
+
+Where the time went:
+
+- **Decoder** — residuals are decoded straight into the output plane
+  and predicted in place (no per-slice residual buffer, no copy, no
+  copy of the G plane for RGB); when two codes fit in one 12-bit table
+  index a companion table yields two symbols per probe with a
+  branch-free refill; the gradient predictor keeps one add on its
+  serial chain and the median is written so that only two operations
+  depend on the running sample.
+- **Encoder** — a per-slice histogram gives every slice's packed size
+  before packing, so slices are packed directly into the final buffer
+  by a branch-free 64-bit packer taking two codes per step; forward
+  predictors read only source samples over zipped rows (they
+  vectorise); source planes are no longer copied (only the two
+  decorrelated RGB planes are).
+
 ## Threading
 
 **Serial by default — parallelism is opt-in (round 420, execution
@@ -89,10 +144,13 @@ The budget is a pure scheduling input: output is **byte-identical for
 every budget** (pinned across the whole 19-fixture reference corpus at
 budgets 1/2/8, on both the direct and trait surfaces, by
 `tests/round420_execution_invariance.rs`). The `thread_scaling` bench
-keeps the win measured — on a 16-core host at 1280×720 ULY4 with 8
-slices: decode ≈5.8× at 4 workers (≈6.8× at max), encode ≈3.5× at 4
-workers (Amdahl-bounded by the single-threaded per-plane Huffman
-build).
+keeps the win measured — re-measured this round at 1280×720 ULY4, 8
+slices, gradient predictor: decode 5.3 ms → 2.8 ms at 2 workers →
+1.5 ms at 4 (3.5×) → 0.96 ms at 8 or more (5.5×); encode 2.5 ms →
+1.5 ms at 2 → 1.0 ms at 4 (2.5×), with nothing further beyond 4 (the
+per-plane code-length build is serial and each plane opens two short
+thread scopes). An earlier revision of this file claimed 5.8× decode
+at 4 workers; that figure was not reproducible.
 
 **Behaviour change:** before round 420, `decode_frame` /
 `encode_frame` silently fanned out across host threads for large

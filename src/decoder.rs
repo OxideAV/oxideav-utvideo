@@ -410,11 +410,14 @@ fn finish_decode(
     }
 
     if cfg.fourcc.is_rgb_family() {
-        let g_clone = decoded_planes[0].samples.clone();
-        let (_, rest) = decoded_planes.split_first_mut().unwrap();
+        let (g_plane, rest) = decoded_planes.split_first_mut().unwrap();
         let (b_plane, rest2) = rest.split_first_mut().unwrap();
         let r_plane = &mut rest2[0];
-        predict::inverse_decorrelate_rgb(&g_clone, &mut b_plane.samples, &mut r_plane.samples);
+        predict::inverse_decorrelate_rgb(
+            &g_plane.samples,
+            &mut b_plane.samples,
+            &mut r_plane.samples,
+        );
     }
 
     Ok(DecodedFrame {
@@ -453,11 +456,14 @@ fn finish_decode_strict(cfg: &StreamConfig, parsed: ParsedFrame<'_>) -> Result<D
     }
 
     if cfg.fourcc.is_rgb_family() {
-        let g_clone = decoded_planes[0].samples.clone();
-        let (_, rest) = decoded_planes.split_first_mut().unwrap();
+        let (g_plane, rest) = decoded_planes.split_first_mut().unwrap();
         let (b_plane, rest2) = rest.split_first_mut().unwrap();
         let r_plane = &mut rest2[0];
-        predict::inverse_decorrelate_rgb(&g_clone, &mut b_plane.samples, &mut r_plane.samples);
+        predict::inverse_decorrelate_rgb(
+            &g_plane.samples,
+            &mut b_plane.samples,
+            &mut r_plane.samples,
+        );
     }
 
     Ok(DecodedFrame {
@@ -489,9 +495,9 @@ fn decode_plane_serial(
         if n_pixels == 0 {
             continue;
         }
-        let residuals = table.decode_slice(sb, n_pixels)?;
         let slice_out = &mut out[r_start * pw..r_end * pw];
-        predict::apply_slice(predictor, slice_out, pw, rows, &residuals);
+        table.decode_slice_into(sb, slice_out)?;
+        predict::apply_slice_in_place(predictor, slice_out, pw, rows);
     }
     Ok(())
 }
@@ -518,9 +524,9 @@ fn decode_plane_serial_strict(
         if n_pixels == 0 {
             continue;
         }
-        let residuals = table.decode_slice_strict(sb, n_pixels, plane_idx, s)?;
         let slice_out = &mut out[r_start * pw..r_end * pw];
-        predict::apply_slice(predictor, slice_out, pw, rows, &residuals);
+        table.decode_slice_into_strict(sb, slice_out, plane_idx, s)?;
+        predict::apply_slice_in_place(predictor, slice_out, pw, rows);
     }
     Ok(())
 }
@@ -601,10 +607,10 @@ fn decode_plane_parallel(
                     if n_pixels == 0 {
                         continue;
                     }
-                    let res = table.decode_slice(slice_bytes[s_idx], n_pixels);
+                    let res = table.decode_slice_into(slice_bytes[s_idx], strip);
                     match res {
-                        Ok(residuals) => {
-                            predict::apply_slice(predictor, strip, pw, rows, &residuals);
+                        Ok(_) => {
+                            predict::apply_slice_in_place(predictor, strip, pw, rows);
                         }
                         Err(e) => {
                             let mut guard = errors_ref.lock().unwrap();

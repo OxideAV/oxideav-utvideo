@@ -36,13 +36,12 @@ fn med(a: u8, b: u8, c: u8) -> u8 {
     median3(a, b, g)
 }
 
-/// Median of three bytes. `a + b + c - max - min`, computed in `u16`
-/// so the intermediate sum (`<= 765`) cannot overflow.
+/// Median of three bytes as `max(min(a, b), min(max(a, b), c))`: the
+/// two operations on `(a, b)` alone are independent of `c`, which keeps
+/// the serial dependency through the inverse predictor short.
 #[inline]
 fn median3(a: u8, b: u8, c: u8) -> u8 {
-    let hi = a.max(b).max(c);
-    let lo = a.min(b).min(c);
-    (a as u16 + b as u16 + c as u16 - hi as u16 - lo as u16) as u8
+    a.min(b).max(a.max(b).min(c))
 }
 
 /// Inverse-predict one slice's residuals into a `slice_rows x W` buffer.
@@ -73,12 +72,13 @@ pub fn apply(
         let r_end = (plane_height * (s_idx + 1)) / num_slices;
         let rows = r_end - r_start;
         debug_assert_eq!(residuals.len(), rows * width);
-        match pred {
-            Predictor::None => apply_none(plane, width, r_start, r_end, residuals),
-            Predictor::Left => apply_left(plane, width, r_start, r_end, residuals),
-            Predictor::Gradient => apply_gradient(plane, width, r_start, r_end, residuals),
-            Predictor::Median => apply_median(plane, width, r_start, r_end, residuals),
-        }
+        apply_slice(
+            pred,
+            &mut plane[r_start * width..r_end * width],
+            width,
+            rows,
+            residuals,
+        );
     }
 }
 
@@ -88,188 +88,84 @@ pub fn apply(
 /// (per `spec/04` §§3.1, 4, 5, 7 — every slice's column 0 of row 0 is
 /// `residual + 128`). All inter-row references inside the slice live
 /// inside `strip`; nothing outside the strip is read or written.
-///
-/// This is the building block the round-4 slice-parallel decoder uses
-/// — each slice owns a disjoint mutable strip and applies the
-/// predictor in place.
 pub fn apply_slice(pred: Predictor, strip: &mut [u8], width: usize, rows: usize, residuals: &[u8]) {
     debug_assert_eq!(strip.len(), width * rows);
     debug_assert_eq!(residuals.len(), width * rows);
-    // The pre-existing per-mode helpers operate on a `(r_start, r_end)`
-    // sub-range of a larger plane buffer. For a single-slice strip we
-    // reuse them with `r_start = 0, r_end = rows` over the strip
-    // itself — which is exactly what they would do for any independent
-    // slice, by the spec's per-slice seed convention.
+    strip.copy_from_slice(residuals);
+    apply_slice_in_place(pred, strip, width, rows);
+}
+
+/// Inverse prediction of one slice **in place**: on entry `strip` holds
+/// the slice's `rows * width` residuals in scan order, on return the
+/// reconstructed samples. This is what the decoder runs — the entropy
+/// stage writes residuals straight into the output plane, so no
+/// separate residual buffer exists.
+pub fn apply_slice_in_place(pred: Predictor, strip: &mut [u8], width: usize, rows: usize) {
+    debug_assert_eq!(strip.len(), width * rows);
+    if width == 0 || rows == 0 {
+        return;
+    }
     match pred {
-        Predictor::None => apply_none(strip, width, 0, rows, residuals),
-        Predictor::Left => apply_left(strip, width, 0, rows, residuals),
-        Predictor::Gradient => apply_gradient(strip, width, 0, rows, residuals),
-        Predictor::Median => apply_median(strip, width, 0, rows, residuals),
-    }
-}
-
-fn apply_none(plane: &mut [u8], width: usize, r_start: usize, r_end: usize, residuals: &[u8]) {
-    if width == 0 || r_end == r_start {
-        return;
-    }
-    debug_assert_eq!(residuals.len(), (r_end - r_start) * width);
-    // Row-strided copy. `chunks_exact_mut(width)` over the slice-strip
-    // gives the compiler a known row length so the inner copy is a
-    // bounds-check-free `copy_from_slice` (memcpy intrinsic).
-    let strip = &mut plane[r_start * width..r_end * width];
-    let dst_rows = strip.chunks_exact_mut(width);
-    let src_rows = residuals.chunks_exact(width);
-    for (dst, src) in dst_rows.zip(src_rows) {
-        dst.copy_from_slice(src);
-    }
-}
-
-fn apply_left(plane: &mut [u8], width: usize, r_start: usize, r_end: usize, residuals: &[u8]) {
-    if width == 0 || r_end == r_start {
-        return;
-    }
-    debug_assert_eq!(residuals.len(), (r_end - r_start) * width);
-    // Continuous-wrap Left across rows: `prev` is the running cumulative
-    // running sum, seeded once at +128 per slice and carried row-to-row
-    // (column 0 of row r reads the running prev = `sample[r-1, W-1]`).
-    // Row-strided iteration so the inner add+store loop sees a fixed
-    // `width` slice (bounds-check elided after the first access).
-    let strip = &mut plane[r_start * width..r_end * width];
-    let mut prev: u8 = 128;
-    let dst_rows = strip.chunks_exact_mut(width);
-    let src_rows = residuals.chunks_exact(width);
-    for (dst, src) in dst_rows.zip(src_rows) {
-        for (d, &r) in dst.iter_mut().zip(src.iter()) {
-            let s = r.wrapping_add(prev);
-            *d = s;
-            prev = s;
+        Predictor::None => {}
+        Predictor::Left => undo_left(strip, 128),
+        Predictor::Gradient => {
+            let (first, mut rest) = strip.split_at_mut(width);
+            undo_left(first, 128);
+            let mut above: &[u8] = first;
+            while !rest.is_empty() {
+                let (row, tail) = rest.split_at_mut(width);
+                // Column 0 predicts from the sample above (`spec/04`
+                // §7.1); the interior adds `left + top - top_left`.
+                let mut left = row[0].wrapping_add(above[0]);
+                row[0] = left;
+                for ((d, &top), &top_left) in row[1..].iter_mut().zip(&above[1..]).zip(above) {
+                    // `top - top_left + residual` does not depend on the
+                    // running value: one add on the serial chain.
+                    left = left.wrapping_add(d.wrapping_add(top).wrapping_sub(top_left));
+                    *d = left;
+                }
+                above = row;
+                rest = tail;
+            }
+        }
+        Predictor::Median => {
+            let (first, mut rest) = strip.split_at_mut(width);
+            undo_left(first, 128);
+            let mut above: &[u8] = first;
+            // Last sample of the row two above, once there is one.
+            let mut two_above_last: Option<u8> = None;
+            while !rest.is_empty() {
+                let (row, tail) = rest.split_at_mut(width);
+                // Column 0 (`spec/04` §5.0): the sample above on the
+                // slice's second row, else the median taken with the
+                // previous row's last sample as "left" and the last
+                // sample of the row before that as "top-left".
+                let above_last = above[width - 1];
+                let p0 = match two_above_last {
+                    None => above[0],
+                    Some(c0) => med(above_last, above[0], c0),
+                };
+                let mut left = row[0].wrapping_add(p0);
+                row[0] = left;
+                for ((d, &top), &top_left) in row[1..].iter_mut().zip(&above[1..]).zip(above) {
+                    left = d.wrapping_add(med(left, top, top_left));
+                    *d = left;
+                }
+                two_above_last = Some(above_last);
+                above = row;
+                rest = tail;
+            }
         }
     }
 }
 
-fn apply_gradient(plane: &mut [u8], width: usize, r_start: usize, r_end: usize, residuals: &[u8]) {
-    if width == 0 || r_end == r_start {
-        return;
-    }
-    // Round 196: hoist the row-0 + column-0 branches out of the inner
-    // loop so the dense interior runs branch-free. The first slice row
-    // is a pure Left-predictor scan (seeded with 128); subsequent rows
-    // start at column-0 with `above[0]` then run the
-    // `a + b - c2` Gradient interior on `[1..width]`.
-    let resid_len = (r_end - r_start) * width;
-    debug_assert_eq!(residuals.len(), resid_len);
-
-    // --- row 0 of the slice: Left-predictor (column 0 = +128 seed) ---
-    {
-        let row_off = r_start * width;
-        let (row, rest) = plane[row_off..].split_at_mut(width);
-        let _ = rest;
-        let resid_row = &residuals[..width];
-        let mut left: u8 = 128;
-        for c in 0..width {
-            let s = resid_row[c].wrapping_add(left);
-            row[c] = s;
-            left = s;
-        }
-    }
-
-    // --- rows 1..rows: Gradient interior ---
-    for r in (r_start + 1)..r_end {
-        let resid_off = (r - r_start) * width;
-        let resid_row = &residuals[resid_off..resid_off + width];
-
-        // We need both the row above (read-only) and the current row
-        // (write). `split_at_mut` at `r * width` yields exactly that
-        // partition; the above row is the LAST `width` bytes of `head`,
-        // the current row is the FIRST `width` bytes of `tail`.
-        let (head, tail) = plane.split_at_mut(r * width);
-        let above = &head[head.len() - width..];
-        let row = &mut tail[..width];
-
-        // Column 0: predictor = above[0].
-        let p0 = above[0];
-        row[0] = resid_row[0].wrapping_add(p0);
-
-        // Columns 1..width: predictor = row[c-1] + above[c] - above[c-1].
-        // Carry the live `left = row[c-1]` value to avoid re-reading the
-        // store we just wrote (the dependency stays in a register).
-        let mut left = row[0];
-        for c in 1..width {
-            let b = above[c];
-            let c2 = above[c - 1];
-            let p = left.wrapping_add(b).wrapping_sub(c2);
-            let s = resid_row[c].wrapping_add(p);
-            row[c] = s;
-            left = s;
-        }
-    }
-}
-
-fn apply_median(plane: &mut [u8], width: usize, r_start: usize, r_end: usize, residuals: &[u8]) {
-    if width == 0 || r_end == r_start {
-        return;
-    }
-    // Round 196: hoist the row-0 + column-0 branches out of the inner
-    // loop so the dense interior runs branch-free. The first slice row
-    // is a pure Left-predictor scan (column-0 = +128 seed). Subsequent
-    // rows pick the column-0 predictor (row 1 → above[0]; row > 1 →
-    // MED(above[W-1], above[0], two-rows-above[W-1])) then run the
-    // dense MED interior across `[1..width]`.
-    let resid_len = (r_end - r_start) * width;
-    debug_assert_eq!(residuals.len(), resid_len);
-
-    // --- row 0 of the slice: Left-predictor (column 0 = +128 seed) ---
-    {
-        let row_off = r_start * width;
-        let (row, rest) = plane[row_off..].split_at_mut(width);
-        let _ = rest;
-        let resid_row = &residuals[..width];
-        let mut left: u8 = 128;
-        for c in 0..width {
-            let s = resid_row[c].wrapping_add(left);
-            row[c] = s;
-            left = s;
-        }
-    }
-
-    // --- rows 1..rows: Median interior ---
-    for r in (r_start + 1)..r_end {
-        let resid_off = (r - r_start) * width;
-        let resid_row = &residuals[resid_off..resid_off + width];
-
-        // We need the row above (read-only) AND, for r > r_start + 1,
-        // the row two above to construct the column-0 MED. Split the
-        // plane buffer at `r * width`; the row above lives at the tail
-        // of `head`; the row two above lives at `head[(r-1-1)*width..]`
-        // when present.
-        let (head, tail) = plane.split_at_mut(r * width);
-        let above = &head[head.len() - width..];
-        let two_above_last: Option<u8> = if r >= r_start + 2 {
-            Some(head[head.len() - 2 * width + (width - 1)])
-        } else {
-            None
-        };
-        let row = &mut tail[..width];
-
-        // Column 0: above[W-1] vs above[0] (vs two-above[W-1]) via MED.
-        let a0 = above[width - 1];
-        let b0 = above[0];
-        let p0 = match two_above_last {
-            None => b0,
-            Some(c0) => med(a0, b0, c0),
-        };
-        row[0] = resid_row[0].wrapping_add(p0);
-
-        // Columns 1..width: MED(row[c-1], above[c], above[c-1]).
-        let mut left = row[0];
-        for c in 1..width {
-            let b = above[c];
-            let c2 = above[c - 1];
-            let p = med(left, b, c2);
-            let s = resid_row[c].wrapping_add(p);
-            row[c] = s;
-            left = s;
-        }
+/// Running sum: `out[i] = seed + in[0] + … + in[i]` (mod 256), in place.
+#[inline]
+fn undo_left(run: &mut [u8], seed: u8) {
+    let mut prev = seed;
+    for d in run {
+        prev = prev.wrapping_add(*d);
+        *d = prev;
     }
 }
 
@@ -319,113 +215,87 @@ pub fn forward_slice(
     r_end: usize,
 ) -> Vec<u8> {
     let rows = r_end - r_start;
-    let mut residuals = Vec::with_capacity(rows * width);
+    if width == 0 || rows == 0 {
+        return Vec::new();
+    }
+    let strip = &plane[r_start * width..r_end * width];
+    if pred == Predictor::None {
+        return strip.to_vec();
+    }
+    let mut residuals = vec![0u8; rows * width];
+    // Every loop below reads only source samples (never its own
+    // output), over equal-length zipped slices: no bounds checks, and
+    // the subtractions vectorise.
+    let (first_src, _) = strip.split_at(width);
     match pred {
-        Predictor::None => {
-            // Row-strided copy: extend the residual buffer with each row
-            // as a contiguous slice (memcpy intrinsic, no per-pixel
-            // bounds check).
-            if width > 0 && r_end > r_start {
-                let strip = &plane[r_start * width..r_end * width];
-                for src in strip.chunks_exact(width) {
-                    residuals.extend_from_slice(src);
-                }
-            }
-        }
+        Predictor::None => {}
         Predictor::Left => {
-            // Continuous-wrap Left: `prev` is the running cumulative
-            // baseline, +128-seeded per slice and carried across rows.
-            if width > 0 && r_end > r_start {
-                let total = (r_end - r_start) * width;
-                residuals.resize(total, 0);
-                let strip = &plane[r_start * width..r_end * width];
-                let mut prev: u8 = 128;
-                let src_rows = strip.chunks_exact(width);
-                let dst_rows = residuals.chunks_exact_mut(width);
-                for (src, dst) in src_rows.zip(dst_rows) {
-                    for (&s, d) in src.iter().zip(dst.iter_mut()) {
-                        *d = s.wrapping_sub(prev);
-                        prev = s;
-                    }
-                }
-            }
+            // Continuous within the slice: the predictor of every sample
+            // but the first is the previous sample in scan order.
+            diff_left(&mut residuals, strip, 128);
         }
         Predictor::Gradient => {
-            // Round 196: hoist branches out of the inner loop (mirror
-            // of `apply_gradient`). Row 0 = Left-predictor (column 0
-            // seed = +128); subsequent rows pick column 0 = above[0]
-            // then run the dense `(a + b - c2)` predictor across
-            // `[1..width]`.
-            if width > 0 && r_end > r_start {
-                let total = (r_end - r_start) * width;
-                residuals.resize(total, 0);
-                // Row 0
+            diff_left(&mut residuals[..width], first_src, 128);
+            for ((dst, row), above) in residuals
+                .chunks_exact_mut(width)
+                .zip(strip.chunks_exact(width))
+                .skip(1)
+                .zip(strip.chunks_exact(width))
+            {
+                dst[0] = row[0].wrapping_sub(above[0]);
+                for ((((d, &cur), &left), &top), &top_left) in dst[1..]
+                    .iter_mut()
+                    .zip(&row[1..])
+                    .zip(row)
+                    .zip(&above[1..])
+                    .zip(above)
                 {
-                    let row = &plane[r_start * width..r_start * width + width];
-                    let dst = &mut residuals[..width];
-                    let mut prev: u8 = 128;
-                    for c in 0..width {
-                        let s = row[c];
-                        dst[c] = s.wrapping_sub(prev);
-                        prev = s;
-                    }
-                }
-                // Rows 1..
-                for r in (r_start + 1)..r_end {
-                    let above = &plane[(r - 1) * width..(r - 1) * width + width];
-                    let row = &plane[r * width..r * width + width];
-                    let dst = &mut residuals[(r - r_start) * width..(r - r_start) * width + width];
-                    // Column 0: predictor = above[0]
-                    dst[0] = row[0].wrapping_sub(above[0]);
-                    // Columns 1..: predictor = row[c-1] + above[c] - above[c-1]
-                    for c in 1..width {
-                        let p = row[c - 1].wrapping_add(above[c]).wrapping_sub(above[c - 1]);
-                        dst[c] = row[c].wrapping_sub(p);
-                    }
+                    *d = cur.wrapping_sub(left.wrapping_add(top).wrapping_sub(top_left));
                 }
             }
         }
         Predictor::Median => {
-            // Round 196: hoist branches (mirror of `apply_median`).
-            if width > 0 && r_end > r_start {
-                let total = (r_end - r_start) * width;
-                residuals.resize(total, 0);
-                // Row 0: Left-predictor (column 0 seed = +128).
+            diff_left(&mut residuals[..width], first_src, 128);
+            let mut two_above_last: Option<u8> = None;
+            for ((dst, row), above) in residuals
+                .chunks_exact_mut(width)
+                .zip(strip.chunks_exact(width))
+                .skip(1)
+                .zip(strip.chunks_exact(width))
+            {
+                let above_last = above[width - 1];
+                let p0 = match two_above_last {
+                    None => above[0],
+                    Some(c0) => med(above_last, above[0], c0),
+                };
+                dst[0] = row[0].wrapping_sub(p0);
+                for ((((d, &cur), &left), &top), &top_left) in dst[1..]
+                    .iter_mut()
+                    .zip(&row[1..])
+                    .zip(row)
+                    .zip(&above[1..])
+                    .zip(above)
                 {
-                    let row = &plane[r_start * width..r_start * width + width];
-                    let dst = &mut residuals[..width];
-                    let mut prev: u8 = 128;
-                    for c in 0..width {
-                        let s = row[c];
-                        dst[c] = s.wrapping_sub(prev);
-                        prev = s;
-                    }
+                    *d = cur.wrapping_sub(med(left, top, top_left));
                 }
-                // Rows 1..
-                for r in (r_start + 1)..r_end {
-                    let above = &plane[(r - 1) * width..(r - 1) * width + width];
-                    let row = &plane[r * width..r * width + width];
-                    let dst = &mut residuals[(r - r_start) * width..(r - r_start) * width + width];
-                    // Column 0: row 1 → above[0]; row > 1 → MED(above[W-1], above[0], two-above[W-1]).
-                    let a0 = above[width - 1];
-                    let b0 = above[0];
-                    let p0 = if r == r_start + 1 {
-                        b0
-                    } else {
-                        let two_above = &plane[(r - 2) * width..(r - 2) * width + width];
-                        med(a0, b0, two_above[width - 1])
-                    };
-                    dst[0] = row[0].wrapping_sub(p0);
-                    // Columns 1..: predictor = MED(row[c-1], above[c], above[c-1]).
-                    for c in 1..width {
-                        let p = med(row[c - 1], above[c], above[c - 1]);
-                        dst[c] = row[c].wrapping_sub(p);
-                    }
-                }
+                two_above_last = Some(above_last);
             }
         }
     }
     residuals
+}
+
+/// `dst[0] = src[0] - seed`, `dst[i] = src[i] - src[i - 1]` (mod 256).
+#[inline]
+fn diff_left(dst: &mut [u8], src: &[u8], seed: u8) {
+    debug_assert_eq!(dst.len(), src.len());
+    let Some((d0, rest)) = dst.split_first_mut() else {
+        return;
+    };
+    *d0 = src[0].wrapping_sub(seed);
+    for ((d, &cur), &prev) in rest.iter_mut().zip(&src[1..]).zip(src) {
+        *d = cur.wrapping_sub(prev);
+    }
 }
 
 /// Cross-entropy proxy over the residual symbol distribution of a

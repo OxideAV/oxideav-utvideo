@@ -12,8 +12,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Code lengths above 32 bits were refused.** The descriptor byte carries any length in 1 … 254 and a conformant decoder must take all of them (spec §05 §7.2); `HuffmanTable::build` reported `KraftViolation` for anything past 32. Kraft equality is now checked by folding the length histogram (exact at any depth), codes up to 32 bits keep the table path, and longer ones are decoded bit-serially from the histogram. `tests/long_codes.rs` hand-builds frames at every depth 1 … 254 from the spec text alone and cross-checks the black-box decoder (which reproduces them up to 32 bits and declines beyond).
 
+### Changed
+
+- **Decode 1.35–2.5× faster, encode 1.9–6.2× faster** (single thread, 1920×1080, every FourCC × predictor; table in the README; output byte-identical). Decoder: residuals decoded straight into the output plane and predicted in place, a two-symbols-per-probe table with a branch-free refill for tables with short codes, shorter serial chains in the gradient and median predictors, no G-plane copy for RGB. Encoder: per-slice histograms give exact slice sizes so slices are packed in their final position by a branch-free two-codes-per-step packer, vectorisable forward predictors, no source-plane copies.
+- README thread-scaling figures re-measured (decode 3.5× and encode 2.5× at 4 workers on 8 slices); the earlier 5.8× decode claim was not reproducible.
+
 ### Added
 
+- `benches/families.rs` — every FourCC × predictor at 1080p plus noise and deep-code content, decode and encode.
+- `HuffmanTable::decode_slice_into` / `decode_slice_into_strict` and `predict::apply_slice_in_place` / `forward_on_row_grid` (internal modules).
 - `tests/blackbox_matrix.rs` — live interoperability matrix against the `ffmpeg` executable in both directions (skips when the tool is absent): 7 469 foreign cells (6 858 / 6 858 verifiable bit-exact, 611 without an oracle) and 9 565 own cells (all accepted warning-free, bit-exact), with a size comparison (+0.01 %).
 - `Fourcc::slice_row_step` / `Fourcc::slice_rows` — the per-plane slice row partition.
 - Registry decoder answers `output_params()` / `output_pixel_format()` (width, height, `Yuv420P` / `Yuv422P` / `Yuv444P` / `Gbrp8` / `Gbrap8`) as soon as the stream is configured.

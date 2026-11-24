@@ -46,7 +46,7 @@
 
 use crate::error::{Error, Result};
 use crate::fourcc::{Fourcc, Predictor, slice_row_range};
-use crate::huffman::{BitWriter, HuffmanTable};
+use crate::huffman::HuffmanTable;
 use crate::predict;
 
 /// Frames whose `width * height` (luma plane) is below this threshold
@@ -144,71 +144,62 @@ pub fn encode_frame_with_workers(frame: &EncodedFrame, workers: usize) -> Result
 /// also serialised. Exposed so callers can opt out of the thread-pool
 /// spin-up cost in latency-sensitive single-frame paths.
 pub fn encode_frame_serial(frame: &EncodedFrame) -> Result<Vec<u8>> {
-    let (mut planes, plane_count) = prepare_planes(frame)?;
-    apply_rgb_decorrelate(frame.fourcc, &mut planes);
-
-    let mut plane_blobs: Vec<Vec<u8>> = Vec::with_capacity(plane_count);
-    for (i, plane) in planes.iter().enumerate() {
-        let (pw, ph) = frame.fourcc.plane_dim(i, frame.width, frame.height);
-        let pw = pw as usize;
-        let ph = ph as usize;
-        let slice_residuals = predict::forward_on_row_grid(
-            frame.predictor,
-            plane,
-            pw,
-            ph,
-            frame.fourcc.slice_row_step(i),
-            frame.num_slices,
-        );
-        let (descriptor, table) = build_plane_huffman(&slice_residuals)?;
-        let blob = encode_plane_serial(&descriptor, &table, &slice_residuals, frame.num_slices)?;
-        plane_blobs.push(blob);
-    }
-    Ok(assemble_payload(&plane_blobs, frame.predictor))
+    encode_frame_budgeted(frame, 1)
 }
 
-/// Parallel-path encode: per-plane forward-predict and per-slice
-/// bit-pack both run on `std::thread::scope`, fanned out across at
-/// most `workers.min(num_slices).max(1)` threads regardless of frame
-/// size (no [`PARALLEL_PIXEL_THRESHOLD`] gate). Every slice's
+/// Parallel-path encode: per-slice forward-predict + histogram and
+/// per-slice bit-pack both run on `std::thread::scope`, fanned out
+/// across at most `workers.min(num_slices).max(1)` threads regardless
+/// of frame size (no [`PARALLEL_PIXEL_THRESHOLD`] gate). Every slice's
 /// predictor state restarts at the +128 seed (`spec/04` §§3.1, 4, 5,
 /// 7) and every slice's Huffman bit-stream is self-contained
 /// (`spec/02` §5), so the fan-out is bit-exact equivalent to the
 /// serial path. A `workers` budget of 0 or 1 degenerates to the
 /// serial walk.
 pub fn encode_frame_parallel(frame: &EncodedFrame, workers: usize) -> Result<Vec<u8>> {
-    let (mut planes, plane_count) = prepare_planes(frame)?;
-    apply_rgb_decorrelate(frame.fourcc, &mut planes);
-
-    let mut plane_blobs: Vec<Vec<u8>> = Vec::with_capacity(plane_count);
-    for (i, plane) in planes.iter().enumerate() {
-        let (pw, ph) = frame.fourcc.plane_dim(i, frame.width, frame.height);
-        let pw = pw as usize;
-        let ph = ph as usize;
-        let slice_residuals = forward_parallel(
-            frame.predictor,
-            plane,
-            pw,
-            ph,
-            frame.fourcc.slice_row_step(i),
-            frame.num_slices,
-            workers,
-        );
-        let (descriptor, table) = build_plane_huffman(&slice_residuals)?;
-        let blob = encode_plane_parallel(
-            &descriptor,
-            &table,
-            &slice_residuals,
-            frame.num_slices,
-            workers,
-        )?;
-        plane_blobs.push(blob);
-    }
-    Ok(assemble_payload(&plane_blobs, frame.predictor))
+    encode_frame_budgeted(frame, workers)
 }
 
-/// Validate, clone, and dimension-check the per-plane input buffers.
-fn prepare_planes(frame: &EncodedFrame) -> Result<(Vec<Vec<u8>>, usize)> {
+fn encode_frame_budgeted(frame: &EncodedFrame, workers: usize) -> Result<Vec<u8>> {
+    let plane_count = validate_frame(frame)?;
+
+    // RGB forward decorrelation (`spec/04` §6): `B' = B - G + 128`,
+    // `R' = R - G + 128`; G and A are coded as they are. Only the two
+    // transformed planes are copied — every other plane is read in
+    // place from the caller's buffers.
+    let decorrelated = frame.fourcc.is_rgb_family().then(|| {
+        let mut b = frame.planes[1].samples.clone();
+        let mut r = frame.planes[2].samples.clone();
+        predict::forward_decorrelate_rgb(&frame.planes[0].samples, &mut b, &mut r);
+        (b, r)
+    });
+
+    let input_bytes: usize = frame.planes.iter().map(|p| p.samples.len()).sum();
+    let mut out: Vec<u8> = Vec::with_capacity(input_bytes / 2 + plane_count * 320 + 4);
+    for i in 0..plane_count {
+        let samples: &[u8] = match (&decorrelated, i) {
+            (Some((b, _)), 1) => b,
+            (Some((_, r)), 2) => r,
+            _ => &frame.planes[i].samples,
+        };
+        let (pw, ph) = frame.fourcc.plane_dim(i, frame.width, frame.height);
+        encode_plane(
+            &mut out,
+            samples,
+            pw as usize,
+            ph as usize,
+            frame.fourcc.slice_row_step(i),
+            frame,
+            workers,
+        )?;
+    }
+    out.extend_from_slice(&frame.predictor.as_frame_info_bits().to_le_bytes());
+    Ok(out)
+}
+
+/// Check the frame description and the per-plane buffer sizes; returns
+/// the plane count.
+fn validate_frame(frame: &EncodedFrame) -> Result<usize> {
     frame.fourcc.validate_dims(frame.width, frame.height)?;
     let plane_count = frame.fourcc.plane_count();
     if frame.planes.len() != plane_count {
@@ -240,126 +231,257 @@ fn prepare_planes(frame: &EncodedFrame) -> Result<(Vec<Vec<u8>>, usize)> {
         });
     }
 
-    let planes: Vec<Vec<u8>> = frame.planes.iter().map(|p| p.samples.clone()).collect();
-    for (i, p) in planes.iter().enumerate() {
+    for (i, p) in frame.planes.iter().enumerate() {
         let (pw, ph) = frame.fourcc.plane_dim(i, frame.width, frame.height);
         let expected = (pw as usize) * (ph as usize);
-        if p.len() != expected {
+        if p.samples.len() != expected {
             return Err(Error::EncoderPlaneSizeMismatch {
                 plane: i,
                 expected,
-                got: p.len(),
+                got: p.samples.len(),
             });
         }
     }
-    Ok((planes, plane_count))
+    Ok(plane_count)
 }
 
-/// RGB forward decorrelation: `B' = B - G + 128`, `R' = R - G + 128`
-/// (`spec/04` §6). Operates in-place; G is untouched. Only runs for
-/// `Ulrg` / `Ulra`.
-fn apply_rgb_decorrelate(fourcc: Fourcc, planes: &mut [Vec<u8>]) {
-    if !fourcc.is_rgb_family() {
-        return;
-    }
-    let g_clone = planes[0].clone();
-    let (_, tail) = planes.split_first_mut().unwrap();
-    let (b, rest) = tail.split_first_mut().unwrap();
-    let r = &mut rest[0];
-    predict::forward_decorrelate_rgb(&g_clone, b, r);
-}
-
-/// Concatenate per-plane wire blobs + trailing frame-info dword.
-fn assemble_payload(plane_blobs: &[Vec<u8>], predictor: Predictor) -> Vec<u8> {
-    let total_size: usize = plane_blobs.iter().map(|b| b.len()).sum::<usize>() + 4;
-    let mut out: Vec<u8> = Vec::with_capacity(total_size);
-    for b in plane_blobs {
-        out.extend_from_slice(b);
-    }
-    let frame_info = predictor.as_frame_info_bits();
-    out.extend_from_slice(&frame_info.to_le_bytes());
-    out
-}
-
-/// Per-slice parallel forward-predict. Each slice's first-pixel seed
-/// is `128` (`spec/04` §§3.1, 4, 5, 7) and the predictor reads only
-/// samples in rows `r_start..r_end`, so the work is fully independent.
-fn forward_parallel(
-    pred: Predictor,
-    plane: &[u8],
+/// Encode one plane and append its wire blob to `out`: 256-byte
+/// descriptor, `num_slices` u32 LE end offsets, slice data
+/// (`spec/02` §2).
+///
+/// Three stages. (1) Per slice: forward-predict and count the residual
+/// symbols. (2) Once per plane: code lengths from the summed counts.
+/// (3) Per slice: pack. Because stage 1 leaves a histogram per slice,
+/// each slice's packed size is known exactly before stage 3, so the
+/// slice data is packed straight into its final position in `out` —
+/// no per-slice buffers, no concatenation. Stages 1 and 3 fan out
+/// across the caller's worker budget.
+fn encode_plane(
+    out: &mut Vec<u8>,
+    samples: &[u8],
     width: usize,
-    plane_height: usize,
+    height: usize,
     row_step: usize,
-    num_slices: usize,
+    frame: &EncodedFrame,
     workers: usize,
-) -> Vec<Vec<u8>> {
-    // Caller-granted budget clamped to the work-unit count; the host
-    // is deliberately NOT queried (threading contract).
-    let par = workers.min(num_slices).max(1);
-    if par <= 1 || num_slices <= 1 {
-        return predict::forward_on_row_grid(
-            pred,
-            plane,
-            width,
-            plane_height,
-            row_step,
-            num_slices,
-        );
-    }
+) -> Result<()> {
+    let num_slices = frame.num_slices;
+    let predictor = frame.predictor;
 
-    // Build (r_start, r_end) tuples on the parent thread.
-    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(num_slices);
-    for s in 0..num_slices {
-        ranges.push(slice_row_range(plane_height, row_step, num_slices, s));
-    }
+    let slices: Vec<(Vec<u8>, [u32; 256])> =
+        fan_out((0..num_slices).collect(), workers, |_, s: usize| {
+            let (r_start, r_end) = slice_row_range(height, row_step, num_slices, s);
+            let residuals = predict::forward_slice(predictor, samples, width, r_start, r_end);
+            let counts = histogram(&residuals);
+            (residuals, counts)
+        });
 
-    // Pre-size the output Vec so each thread writes into its own slot
-    // without locking.
-    let mut out: Vec<Vec<u8>> = (0..num_slices).map(|_| Vec::new()).collect();
-    let chunk_size = num_slices.div_ceil(par);
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(par);
-        // Chunk the (slice_idx, range, out_slot) tuples into `par` buckets,
-        // then dispatch each bucket to one thread. Each bucket has
-        // exclusive ownership of its slots via split_at_mut.
-        let mut remaining: &mut [Vec<u8>] = &mut out[..];
-        let mut start_idx = 0usize;
-        for bucket in 0..par {
-            let take = chunk_size.min(num_slices.saturating_sub(start_idx));
-            if take == 0 {
-                continue;
-            }
-            let (head, tail) = remaining.split_at_mut(take);
-            remaining = tail;
-            let bucket_ranges: Vec<(usize, usize)> = ranges[start_idx..start_idx + take].to_vec();
-            start_idx += take;
-            let _ = bucket;
-            let head_ref = head;
-            handles.push(scope.spawn(move || {
-                for (slot, (r_start, r_end)) in head_ref.iter_mut().zip(bucket_ranges.iter()) {
-                    *slot = predict::forward_slice(pred, plane, width, *r_start, *r_end);
-                }
-            }));
+    let mut counts = [0u64; 256];
+    for (_, slice_counts) in &slices {
+        for (total, &c) in counts.iter_mut().zip(slice_counts) {
+            *total += u64::from(c);
         }
-        for h in handles {
-            let _ = h.join();
+    }
+    let (descriptor, table) = build_plane_huffman(&counts)?;
+    let packer = SlicePacker::new(&table);
+
+    out.extend_from_slice(&descriptor);
+    let mut end = 0usize;
+    let sizes: Vec<usize> = slices
+        .iter()
+        .map(|(_, slice_counts)| packer.packed_bytes(slice_counts))
+        .collect();
+    for &size in &sizes {
+        end += size;
+        out.extend_from_slice(&(end as u32).to_le_bytes());
+    }
+    let data_start = out.len();
+    out.resize(data_start + end, 0);
+
+    let mut regions: Vec<(&mut [u8], &[u8])> = Vec::with_capacity(num_slices);
+    let mut remaining = &mut out[data_start..];
+    for (&size, (residuals, _)) in sizes.iter().zip(&slices) {
+        let (region, tail) = remaining.split_at_mut(size);
+        regions.push((region, residuals.as_slice()));
+        remaining = tail;
+    }
+    let complete = fan_out(regions, workers, |_, (region, residuals)| {
+        packer.pack(residuals, region)
+    });
+    if complete.contains(&false) {
+        // A residual without a code: the table was not built from these
+        // residuals. Unreachable from this function.
+        return Err(Error::HuffmanDecodeFailure { bit_position: 0 });
+    }
+    Ok(())
+}
+
+/// Run `f(index, item)` for every item and return the results in item
+/// order. With a budget above one the items are split into contiguous
+/// runs, one scoped thread per run, at most `workers.min(items.len())`
+/// threads; the host is never queried (threading contract). The join
+/// is a blocking wait.
+fn fan_out<I: Send, T: Send>(
+    items: Vec<I>,
+    workers: usize,
+    f: impl Fn(usize, I) -> T + Sync,
+) -> Vec<T> {
+    let n = items.len();
+    let threads = workers.min(n).max(1);
+    if threads == 1 {
+        return items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| f(i, item))
+            .collect();
+    }
+    let run = n.div_ceil(threads);
+    let mut results: Vec<Option<T>> = (0..n).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let f = &f;
+        let mut items = items.into_iter().enumerate();
+        for slots in results.chunks_mut(run) {
+            let batch: Vec<(usize, I)> = items.by_ref().take(slots.len()).collect();
+            scope.spawn(move || {
+                for (slot, (i, item)) in slots.iter_mut().zip(batch) {
+                    *slot = Some(f(i, item));
+                }
+            });
         }
     });
-    out
+    results
+        .into_iter()
+        .map(|r| r.expect("every slot is filled before the scope ends"))
+        .collect()
+}
+
+/// Symbol counts of `data`. Four interleaved tables break the
+/// store-to-load dependency between consecutive equal symbols (long
+/// runs of one residual are the common case after prediction).
+fn histogram(data: &[u8]) -> [u32; 256] {
+    let mut lanes = [[0u32; 256]; 4];
+    let (quads, rest) = data.as_chunks::<4>();
+    for q in quads {
+        lanes[0][q[0] as usize] += 1;
+        lanes[1][q[1] as usize] += 1;
+        lanes[2][q[2] as usize] += 1;
+        lanes[3][q[3] as usize] += 1;
+    }
+    for &b in rest {
+        lanes[0][b as usize] += 1;
+    }
+    let mut total = [0u32; 256];
+    for (s, t) in total.iter_mut().enumerate() {
+        *t = lanes[0][s] + lanes[1][s] + lanes[2][s] + lanes[3][s];
+    }
+    total
+}
+
+/// Per-plane packing table: every symbol's code left-aligned in a
+/// 32-bit word, and its length (0 = no code).
+struct SlicePacker {
+    code: [u32; 256],
+    len: [u8; 256],
+    /// No slice data at all (`spec/05` §6.1 single-symbol plane, or an
+    /// empty plane).
+    empty: bool,
+    max_len: u8,
+}
+
+impl SlicePacker {
+    fn new(table: &HuffmanTable) -> Self {
+        let mut code = [0u32; 256];
+        let mut len = [0u8; 256];
+        let mut max_len = 0u8;
+        for s in 0..=255u8 {
+            if let Some((c, l)) = table.code_for(s) {
+                code[s as usize] = c << (32 - u32::from(l));
+                len[s as usize] = l;
+                max_len = max_len.max(l);
+            }
+        }
+        SlicePacker {
+            code,
+            len,
+            empty: table.single_symbol.is_some() || max_len == 0,
+            max_len,
+        }
+    }
+
+    /// Exact byte size of a slice with these symbol counts: the code
+    /// bits rounded up to a 32-bit word (`spec/05` §4.4).
+    fn packed_bytes(&self, counts: &[u32; 256]) -> usize {
+        if self.empty {
+            return 0;
+        }
+        let bits: u64 = counts
+            .iter()
+            .zip(&self.len)
+            .map(|(&c, &l)| u64::from(c) * u64::from(l))
+            .sum();
+        (bits.div_ceil(32) * 4) as usize
+    }
+
+    /// Pack `residuals` into `region`, which is exactly
+    /// [`packed_bytes`](Self::packed_bytes) long and zero-filled:
+    /// 32-bit LE words, MSB first, zero padding (`spec/05` §4).
+    /// Returns `false` if a residual has no code.
+    ///
+    /// The pending bits sit left-aligned in a 64-bit register. After
+    /// each step the register's top word is stored at the current
+    /// output word — a complete word when 32 or more bits are pending,
+    /// otherwise a prefix that a later store overwrites — and the
+    /// position advances by a conditional move, so the loop has no
+    /// data-dependent branch. Codes of at most 16 bits (always the
+    /// case for this encoder's tables) go two per step.
+    fn pack(&self, residuals: &[u8], region: &mut [u8]) -> bool {
+        if self.empty {
+            return true;
+        }
+        let (words, _) = region.as_chunks_mut::<4>();
+        let mut acc: u64 = 0;
+        let mut pending: u32 = 0; // bits in `acc`, always < 32 between steps
+        let mut at = 0usize;
+        let mut complete = true;
+        let mut step = |code: u32, len: u32| {
+            acc |= u64::from(code) << (32 - pending);
+            pending += len;
+            if let Some(word) = words.get_mut(at) {
+                *word = ((acc >> 32) as u32).to_le_bytes();
+            }
+            let full = pending >= 32;
+            at += usize::from(full);
+            acc <<= if full { 32 } else { 0 };
+            pending -= if full { 32 } else { 0 };
+        };
+        let singles = if self.max_len <= 16 {
+            let (pairs, rest) = residuals.as_chunks::<2>();
+            for &[a, b] in pairs {
+                let (len_a, len_b) = (self.len[a as usize], self.len[b as usize]);
+                complete &= len_a != 0 && len_b != 0;
+                let code = self.code[a as usize] | (self.code[b as usize] >> len_a);
+                step(code, u32::from(len_a) + u32::from(len_b));
+            }
+            rest
+        } else {
+            residuals
+        };
+        for &r in singles {
+            let len = self.len[r as usize];
+            complete &= len != 0;
+            step(self.code[r as usize], u32::from(len));
+        }
+        // Bits carried past the last completed word (a zero-length
+        // step stores the register's prefix without adding to it).
+        step(0, 0);
+        complete
+    }
 }
 
 /// Build a 256-byte code-length descriptor + matching [`HuffmanTable`]
 /// from the per-slice residual streams of one plane.
-fn build_plane_huffman(slice_residuals: &[Vec<u8>]) -> Result<([u8; 256], HuffmanTable)> {
-    // Histogram across all slices.
-    let mut counts = [0u64; 256];
-    let mut total = 0u64;
-    for s in slice_residuals {
-        for &r in s {
-            counts[r as usize] += 1;
-            total += 1;
-        }
-    }
+fn build_plane_huffman(counts: &[u64; 256]) -> Result<([u8; 256], HuffmanTable)> {
+    let total: u64 = counts.iter().sum();
 
     // Special case 1: no residuals at all (all slices have zero
     // pixels — only happens in degenerate fixtures). Emit an empty
@@ -388,7 +510,7 @@ fn build_plane_huffman(slice_residuals: &[Vec<u8>]) -> Result<([u8; 256], Huffma
     // General case: build canonical Huffman code lengths via a
     // length-limited package-merge (length cap = 16, matching the
     // empirical maximum across the reference corpus per `spec/05` §7).
-    let lengths = build_lengths(&counts, 16)?;
+    let lengths = build_lengths(counts, 16)?;
 
     let mut descriptor = [255u8; 256];
     for (s, l) in lengths.iter().enumerate() {
@@ -512,130 +634,6 @@ fn build_lengths(counts: &[u64; 256], max_length: u8) -> Result<Vec<u8>> {
         return Err(Error::KraftViolation);
     }
     Ok(lengths)
-}
-
-/// Pack one slice's residuals into its Huffman-coded byte blob.
-/// Returns an empty `Vec` for the single-symbol special case or for
-/// an empty residual stream (both of which carry zero slice-data
-/// bytes per `spec/02` §5.1).
-fn pack_slice(table: &HuffmanTable, residuals: &[u8]) -> Result<Vec<u8>> {
-    if table.single_symbol.is_some() || residuals.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut bw = BitWriter::new();
-    for &r in residuals {
-        let (c, l) = table
-            .code_for(r)
-            .ok_or(Error::HuffmanDecodeFailure { bit_position: 0 })?;
-        bw.write_code(c, l);
-    }
-    Ok(bw.finish())
-}
-
-/// Concatenate per-slice blobs + descriptor + slice-end-offsets table
-/// into the per-plane wire blob: 256-byte descriptor, `num_slices` u32
-/// LE end offsets, slice data.
-fn build_plane_blob(descriptor: &[u8; 256], num_slices: usize, slice_blobs: &[Vec<u8>]) -> Vec<u8> {
-    let mut slice_end_offsets: Vec<u32> = Vec::with_capacity(num_slices);
-    let mut cumulative = 0usize;
-    for blob in slice_blobs {
-        cumulative += blob.len();
-        slice_end_offsets.push(cumulative as u32);
-    }
-    let mut out = Vec::with_capacity(
-        256 + 4 * num_slices + slice_blobs.iter().map(|s| s.len()).sum::<usize>(),
-    );
-    out.extend_from_slice(descriptor);
-    for v in &slice_end_offsets {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    for blob in slice_blobs {
-        out.extend_from_slice(blob);
-    }
-    out
-}
-
-/// Serial per-plane packer: pack each slice into its blob in order,
-/// then assemble.
-fn encode_plane_serial(
-    descriptor: &[u8; 256],
-    table: &HuffmanTable,
-    slice_residuals: &[Vec<u8>],
-    num_slices: usize,
-) -> Result<Vec<u8>> {
-    let mut slice_blobs: Vec<Vec<u8>> = Vec::with_capacity(num_slices);
-    for residuals in slice_residuals.iter().take(num_slices) {
-        slice_blobs.push(pack_slice(table, residuals)?);
-    }
-    Ok(build_plane_blob(descriptor, num_slices, &slice_blobs))
-}
-
-/// Parallel per-plane packer: dispatch slices across a
-/// `std::thread::scope` thread pool. Each slice's Huffman bit-stream
-/// is self-contained (`spec/02` §5), so the packs are fully
-/// independent. The first-failing slice's error wins on join.
-fn encode_plane_parallel(
-    descriptor: &[u8; 256],
-    table: &HuffmanTable,
-    slice_residuals: &[Vec<u8>],
-    num_slices: usize,
-    workers: usize,
-) -> Result<Vec<u8>> {
-    // Caller-granted budget clamped to the work-unit count; the host
-    // is deliberately NOT queried (threading contract).
-    let par = workers.min(num_slices).max(1);
-    if par <= 1 || num_slices <= 1 {
-        return encode_plane_serial(descriptor, table, slice_residuals, num_slices);
-    }
-
-    let mut slice_blobs: Vec<Vec<u8>> = (0..num_slices).map(|_| Vec::new()).collect();
-    let errors: std::sync::Mutex<Option<(usize, Error)>> = std::sync::Mutex::new(None);
-    let chunk_size = num_slices.div_ceil(par);
-
-    std::thread::scope(|scope| {
-        let mut remaining: &mut [Vec<u8>] = &mut slice_blobs[..];
-        let mut start_idx = 0usize;
-        let errors_ref = &errors;
-        for _bucket in 0..par {
-            let take = chunk_size.min(num_slices.saturating_sub(start_idx));
-            if take == 0 {
-                continue;
-            }
-            let (head, tail) = remaining.split_at_mut(take);
-            remaining = tail;
-            let bucket_residuals: Vec<&[u8]> = slice_residuals[start_idx..start_idx + take]
-                .iter()
-                .map(|v| v.as_slice())
-                .collect();
-            let bucket_start = start_idx;
-            start_idx += take;
-            scope.spawn(move || {
-                for (offset, (slot, residuals)) in
-                    head.iter_mut().zip(bucket_residuals.iter()).enumerate()
-                {
-                    let s_idx = bucket_start + offset;
-                    match pack_slice(table, residuals) {
-                        Ok(blob) => *slot = blob,
-                        Err(e) => {
-                            let mut guard = errors_ref.lock().unwrap();
-                            let take_err = guard
-                                .as_ref()
-                                .map(|(prev, _)| s_idx < *prev)
-                                .unwrap_or(true);
-                            if take_err {
-                                *guard = Some((s_idx, e));
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    });
-
-    if let Some((_, e)) = errors.into_inner().unwrap() {
-        return Err(e);
-    }
-    Ok(build_plane_blob(descriptor, num_slices, &slice_blobs))
 }
 
 #[cfg(test)]

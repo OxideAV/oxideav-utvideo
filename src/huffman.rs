@@ -12,19 +12,22 @@
 //! MSB-first within each word (`spec/05` §4). Trailing bits inside
 //! the last word are zero padding.
 //!
-//! ## Decode acceleration (round 3)
+//! ## Decode acceleration
 //!
-//! The decode loop builds a flat lookup table indexed by the next
-//! `LUT_BITS` bits at the read position (`peek_bits(LUT_BITS)`). Each
-//! entry pairs the symbol with the actual code length. When the
-//! peeked LUT slot resolves a complete code (its `length` is the
-//! symbol's true length and `length <= LUT_BITS`), one shift + one
-//! load decodes the symbol. The peek-bits loop falls back to the
-//! length-tier binary search only when the table's `max_len` exceeds
-//! `LUT_BITS` (rare in the wild — `spec/02` §4.2 documents 16-bit
-//! max-codelen as the empirical bound, so a 12-bit LUT covers nearly
-//! every plane outright and the fallback only fires on the ~5–10
-//! longest-coded symbols of a high-entropy plane).
+//! Residuals are decoded straight into the output plane (the inverse
+//! predictor then runs in place), from a 64-bit bit register refilled
+//! one word at a time:
+//!
+//! - a `2^LUT_BITS`-entry table resolves any code of at most `LUT_BITS`
+//!   bits in one probe; longer codes (`spec/02` §4.2 reports up to 16
+//!   bits in practice) are found by a search of the per-length tiers;
+//! - when the shortest code is at most half of `LUT_BITS`, a companion
+//!   table resolves **two** symbols per probe wherever two codes fit in
+//!   one index, with a branch-free refill — short codes dominate
+//!   predicted pictures, and the per-symbol cost of a Huffman decoder
+//!   is the serial index → load → shift chain, which this halves;
+//! - codes longer than 32 bits (`spec/05` §7.2 allows 254) are decoded
+//!   bit-serially from the length histogram.
 
 use crate::error::{Error, Result};
 
@@ -60,6 +63,9 @@ pub struct HuffmanTable {
     /// decoder can iterate length tiers in ascending order during the
     /// prefix match. Used by the slow-path fallback when the LUT misses.
     by_length: Vec<RevEntry>,
+    /// `(length, start, end)` index ranges into `by_length`, one per
+    /// distinct code length, ascending; each range is sorted by code.
+    tiers: Vec<(u8, u32, u32)>,
     /// Maximum non-sentinel code length, also = the longest tier's
     /// length. 0 if the table is the single-symbol special case.
     max_len: u8,
@@ -69,6 +75,8 @@ pub struct HuffmanTable {
     /// `LUT_BITS + 1` (sentinel) and the slow-path search runs.
     /// Always exactly `1 << LUT_BITS` entries.
     lut: Vec<LutEntry>,
+    /// Two-symbol companion of `lut`, same index: see [`build_pair_lut`].
+    pair_lut: Vec<u32>,
     /// `Some(sym)` iff the descriptor is the single-symbol special
     /// case (`code_length[s] = 0`, all others 255). `slice_data` of
     /// length 0 then yields `n_pixels` copies of `sym`.
@@ -149,6 +157,16 @@ impl SerialCode {
     }
 }
 
+/// Outcome of [`HuffmanTable::search_tiers`].
+enum TierHit {
+    /// `(symbol, code length)`.
+    Code(u8, u32),
+    /// A candidate length exceeds the bits available.
+    NeedsMoreBits,
+    /// No code of any length matches.
+    NoCode,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LutEntry {
     sym: u8,
@@ -182,8 +200,10 @@ impl HuffmanTable {
             return Ok(Self {
                 entries: [None; 256],
                 by_length: Vec::new(),
+                tiers: Vec::new(),
                 max_len: 0,
                 lut: Vec::new(),
+                pair_lut: Vec::new(),
                 single_symbol: Some(single),
                 serial: None,
             });
@@ -205,8 +225,10 @@ impl HuffmanTable {
             return Ok(Self {
                 entries: [None; 256],
                 by_length: Vec::new(),
+                tiers: Vec::new(),
                 max_len: 0,
                 lut: Vec::new(),
+                pair_lut: Vec::new(),
                 single_symbol: None,
                 serial: None,
             });
@@ -263,15 +285,25 @@ impl HuffmanTable {
 
         // Stable-sort the reverse table by length ASC to make the
         // decode loop's prefix-match pass iterate shortest-first.
-        by_length.sort_by_key(|t| t.0);
+        by_length.sort_unstable_by_key(|t| (t.0, t.1));
+        let mut tiers: Vec<(u8, u32, u32)> = Vec::new();
+        for (i, entry) in by_length.iter().enumerate() {
+            match tiers.last_mut() {
+                Some(t) if t.0 == entry.0 => t.2 = i as u32 + 1,
+                _ => tiers.push((entry.0, i as u32, i as u32 + 1)),
+            }
+        }
 
         let lut = build_lut(&by_length);
+        let pair_lut = build_pair_lut(&lut);
 
         Ok(Self {
             entries,
             by_length,
+            tiers,
             max_len,
             lut,
+            pair_lut,
             single_symbol: None,
             serial,
         })
@@ -287,12 +319,9 @@ impl HuffmanTable {
     /// Decode `n_pixels` residuals from `slice_data`. The slice byte
     /// length must be a multiple of 4 (`spec/05` §4.1) — caller
     /// validates.
-    ///
-    /// Fast path: peek `LUT_BITS` at the bit-stream position, look up
-    /// `(sym, len)` in `self.lut`. If `len <= LUT_BITS`, emit and
-    /// advance by `len`. Otherwise, fall back to length-tier scan.
     pub fn decode_slice(&self, slice_data: &[u8], n_pixels: usize) -> Result<Vec<u8>> {
-        let (out, _) = self.decode_slice_inner(slice_data, n_pixels)?;
+        let mut out = vec![0u8; n_pixels];
+        self.decode_slice_into(slice_data, &mut out)?;
         Ok(out)
     }
 
@@ -313,16 +342,25 @@ impl HuffmanTable {
         plane: usize,
         slice: usize,
     ) -> Result<Vec<u8>> {
-        let (out, payload_bits) = self.decode_slice_inner(slice_data, n_pixels)?;
-        // The single-symbol / empty-codebook fast paths consume no bits
-        // and `slice_data` is empty (`spec/05` §6.1); `payload_bits`
-        // is 0 and the scan below is a no-op. For the normal path,
-        // `payload_bits` is the bit-reader cursor after the last code.
-        let br = {
-            let mut r = BitReader::new(slice_data);
-            r.consume_bits(payload_bits);
-            r
-        };
+        let mut out = vec![0u8; n_pixels];
+        self.decode_slice_into_strict(slice_data, &mut out, plane, slice)?;
+        Ok(out)
+    }
+
+    /// [`decode_slice_strict`](Self::decode_slice_strict) writing into a
+    /// caller-provided buffer (one residual per element of `out`).
+    pub fn decode_slice_into_strict(
+        &self,
+        slice_data: &[u8],
+        out: &mut [u8],
+        plane: usize,
+        slice: usize,
+    ) -> Result<()> {
+        // The single-symbol / empty paths consume no bits (`spec/05`
+        // §6.1), so the whole of `slice_data` is scanned as padding.
+        let payload_bits = self.decode_slice_into(slice_data, out)?;
+        let mut br = BitReader::new(slice_data);
+        br.consume_bits(payload_bits);
         if let Some(bit_position) = br.first_nonzero_bit_from_here() {
             return Err(Error::NonZeroPadding {
                 plane,
@@ -330,225 +368,213 @@ impl HuffmanTable {
                 bit_position,
             });
         }
-        Ok(out)
+        Ok(())
     }
 
-    /// Core slice decode shared by the lenient and strict entry points.
-    /// Returns the decoded residuals plus the absolute bit position of
-    /// the bit reader after the final symbol (i.e. the payload bit
-    /// count, which the strict path compares against the slice's total
-    /// bit length to locate trailing padding).
-    fn decode_slice_inner(&self, slice_data: &[u8], n_pixels: usize) -> Result<(Vec<u8>, usize)> {
+    /// Decode `out.len()` residuals from `slice_data` into `out` and
+    /// return the number of bits consumed (the position of the first
+    /// padding bit). No allocation.
+    ///
+    /// The next bits of the stream sit left-aligned in a 64-bit
+    /// register refilled one 32-bit word at a time (`spec/05` §4: LE
+    /// words, MSB first). While the register holds at least `max_len`
+    /// stream bits every code resolves from real data — one probe of
+    /// the `LUT_BITS`-wide table, or a search of the longer length
+    /// tiers on a miss — with no end-of-data test per symbol. Only the
+    /// last few symbols of a slice, when the data has run out and fewer
+    /// than `max_len` bits remain, take the length-by-length walk that
+    /// distinguishes a short slice from an undecodable prefix.
+    pub fn decode_slice_into(&self, slice_data: &[u8], out: &mut [u8]) -> Result<usize> {
         if let Some(sym) = self.single_symbol {
-            // Single-symbol fast path: zero bits, every pixel = sym.
-            // `slice_data` should be empty in this case (`spec/05` §6.1).
-            return Ok((vec![sym; n_pixels], 0));
+            // Zero bits, every pixel = sym (`spec/05` §6.1).
+            out.fill(sym);
+            return Ok(0);
         }
+        let n_pixels = out.len();
         if n_pixels == 0 {
-            return Ok((Vec::new(), 0));
+            return Ok(0);
         }
-        if self.by_length.is_empty() {
+        if self.by_length.is_empty() && self.serial.is_none() {
             // No codebook + non-zero pixel count is malformed.
             return Err(Error::HuffmanDecodeFailure { bit_position: 0 });
         }
         if let Some(serial) = &self.serial {
-            return self.decode_slice_serial(serial, slice_data, n_pixels);
+            return self.decode_slice_serial(serial, slice_data, out);
         }
-        let mut br = BitReader::new(slice_data);
-        let mut out = Vec::with_capacity(n_pixels);
-        let lut_bits = LUT_BITS as usize;
 
-        // Group the reverse table into [start_idx_for_length] tiers.
-        // The slow path needs them whenever LUT lookup is bypassed —
-        // either because `max_len > LUT_BITS` (real long-code branch)
-        // or because the bit-stream tail is shorter than `LUT_BITS`
-        // (end-of-slice for shorter codes that still fit).
-        let tiers: Vec<(u8, &[RevEntry])> = {
-            let mut v = Vec::new();
-            let mut i = 0;
-            while i < self.by_length.len() {
-                let l = self.by_length[i].0;
-                let start = i;
-                while i < self.by_length.len() && self.by_length[i].0 == l {
-                    i += 1;
-                }
-                v.push((l, &self.by_length[start..i]));
-            }
-            v
-        };
+        let (words, rest) = slice_data.as_chunks::<4>();
+        // A trailing partial word (only reachable by direct callers —
+        // the frame decoder requires word-aligned slices) is read as a
+        // zero-extended LE word of which the first `8 * rest.len()`
+        // stream bits are in range.
+        let partial_bits = 8 * rest.len() as u32;
+        let mut partial_pending = partial_bits != 0;
+        let max_len = u32::from(self.max_len);
+        let lut = &self.lut[..];
 
-        // --- Fast accumulator-driven LUT loop -------------------------
-        //
-        // The per-pixel `BitReader::peek_bits` path recomputes the word
-        // index and reloads the backing word from raw bytes on *every*
-        // symbol. For a dense plane that is the dominant decode cost.
-        //
-        // Instead, hold the next bits in a left-aligned 64-bit register
-        // (`acc`, valid bits at the MSB end; `acc_len` = how many are
-        // valid). Each symbol becomes: top-`LUT_BITS` mask → LUT lookup
-        // → drop `len` bits. Words are pulled in 32 at a time, MSB-first
-        // within each LE word, so the register's bit order is byte-for-
-        // byte identical to what `peek_bits` would have produced.
-        //
-        // The fast loop only runs while we can *prove* the next symbol
-        // resolves on the LUT without touching past-end zero-padding:
-        // we require `acc_len >= LUT_BITS` and the refill never claims
-        // more bits than `total_bits` actually provides. The instant
-        // either guarantee fails (low tail, or a LUT-miss long code) we
-        // sync `br` to the consumed position and fall through to the
-        // exact-semantics slow path below for that pixel, then re-prime.
-        let total_bits = br.total_bits();
-        let total_words = slice_data.len() / 4; // whole 32-bit words only
-        let max_len = self.max_len as u32;
-        let mut acc: u64 = 0;
-        let mut acc_len: u32 = 0;
-        let mut next_word: usize = 0; // index of next 32-bit word to load
-        let mut consumed: usize = 0; // absolute bits consumed (== br cursor)
+        let mut acc: u64 = 0; // next stream bits, left-aligned
+        let mut acc_len: u32 = 0; // valid bits in `acc`
+        let mut next_word = 0usize;
+        let mut partial_loaded = 0u32;
         let mut px = 0usize;
 
-        // Helper-free refill is inlined below to keep `acc`/`acc_len`
-        // in registers across the loop body. The fast loop only stays in
-        // flight while it holds at least `max_len` *real* buffered bits —
-        // enough to resolve ANY code (LUT hit or long-code tier scan)
-        // without reading into the (zero) padding tail. Once the buffer
-        // can no longer guarantee that, it breaks to the exact-semantics
-        // slow path below, which handles the final sub-`max_len` tail
-        // with the original `peek_bits` zero-extension behaviour.
-        'fast: while px < n_pixels {
-            // Refill: pull whole 32-bit words into the high end of `acc`
-            // until we hold more than 32 valid bits, or run out of whole
-            // words. We never load the partial tail word here.
-            while acc_len <= 32 && next_word < total_words {
-                let byte_off = next_word * 4;
-                let w = u32::from_le_bytes([
-                    slice_data[byte_off],
-                    slice_data[byte_off + 1],
-                    slice_data[byte_off + 2],
-                    slice_data[byte_off + 3],
-                ]);
-                acc |= (w as u64) << (32 - acc_len);
-                acc_len += 32;
-                next_word += 1;
-            }
+        // Bulk loop, taken when two codes can share one table index
+        // (shortest code at most half of `LUT_BITS`); a table of longer
+        // codes yields one symbol per probe either way and goes straight
+        // to the loop below. It runs while a whole word remains to
+        // refill from and four output slots are free. The refill is a
+        // conditional move (no branch to mispredict on variable code
+        // lengths): after it the register holds at least 33 stream
+        // bits, enough for two probes of at most `LUT_BITS` bits each,
+        // or for any single code this path can meet (`max_len <= 32`).
+        let pair_lut = &self.pair_lut[..];
+        let pairs_possible = 2 * u32::from(self.tiers[0].0) <= u32::from(LUT_BITS);
+        while pairs_possible && px + 4 <= n_pixels && next_word < words.len() {
+            let word = u64::from(u32::from_le_bytes(words[next_word]));
+            let refill = acc_len <= 32;
+            let shifted = word << (32u32.wrapping_sub(acc_len) & 63);
+            acc |= if refill { shifted } else { 0 };
+            acc_len += if refill { 32 } else { 0 };
+            next_word += usize::from(refill);
 
-            if acc_len < max_len {
-                // Cannot guarantee a full-length code resolves from the
-                // buffered (non-padding) bits. Hand the tail to the slow
-                // path, which mirrors the original zero-extension reads.
-                break 'fast;
-            }
-
-            // Top `LUT_BITS` bits, right-aligned, as the LUT key.
-            let key = (acc >> (64 - LUT_BITS as u32)) as usize;
-            let entry = self.lut[key];
-            let (sym, l) = if entry.len <= LUT_BITS {
-                (entry.sym, entry.len as u32)
-            } else {
-                // Long code (> LUT_BITS): length-tier prefix scan over the
-                // buffered accumulator bits. `acc_len >= max_len` here, so
-                // every candidate length fits without past-end reads.
-                let mut found: Option<(u8, u32)> = None;
-                for (tl, tier) in &tiers {
-                    let tl = *tl as u32;
-                    if tl <= LUT_BITS as u32 {
-                        // Codes this short were already covered by the LUT
-                        // (a miss means the real code is longer); skip.
+            let entry = pair_lut[(acc >> (64 - u32::from(LUT_BITS))) as usize];
+            let first_len = entry >> 24;
+            if first_len == PAIR_MISS {
+                match self.search_tiers(acc, u32::from(LUT_BITS) + 1, max_len) {
+                    TierHit::Code(sym, len) => {
+                        out[px] = sym;
+                        acc <<= len;
+                        acc_len -= len;
+                        px += 1;
                         continue;
                     }
-                    let candidate = (acc >> (64 - tl)) as u32;
-                    if let Ok(idx) = tier.binary_search_by(|probe| probe.1.cmp(&candidate)) {
-                        found = Some((tier[idx].2, tl));
-                        break;
-                    }
-                }
-                match found {
-                    Some(v) => v,
-                    None => {
-                        br.consume_bits(consumed);
+                    _ => {
                         return Err(Error::HuffmanDecodeFailure {
-                            bit_position: consumed,
+                            bit_position: next_word * 32 - acc_len as usize,
                         });
                     }
                 }
-            };
-            // Bounds: the symbol's true length must fit in the unread
-            // tail of the *whole* stream (matches the original guard).
-            if consumed + (l as usize) > total_bits {
-                br.consume_bits(consumed);
-                return Err(Error::SliceTruncated {
-                    bit_position: consumed,
-                    expected_pixels: n_pixels,
-                    decoded: px,
-                });
             }
-            out.push(sym);
-            acc <<= l;
-            acc_len -= l;
-            consumed += l as usize;
-            px += 1;
+            let total = (entry >> 16) & 0xff;
+            // The second store is harmless when the entry holds one
+            // symbol: the slot is rewritten by the next probe.
+            out[px] = entry as u8;
+            out[px + 1] = (entry >> 8) as u8;
+            px += 1 + usize::from(total != first_len);
+            acc <<= total;
+            acc_len -= total;
+
+            // Second probe on the same refill (at least 21 bits left).
+            let entry = pair_lut[(acc >> (64 - u32::from(LUT_BITS))) as usize];
+            let first_len = entry >> 24;
+            if first_len == PAIR_MISS {
+                continue; // a long code: refill first, resolve at the top
+            }
+            let total = (entry >> 16) & 0xff;
+            out[px] = entry as u8;
+            out[px + 1] = (entry >> 8) as u8;
+            px += 1 + usize::from(total != first_len);
+            acc <<= total;
+            acc_len -= total;
         }
 
-        // Sync the bit reader to the fast loop's consumed position so the
-        // slow path resumes with byte-identical state.
-        br = BitReader::new(slice_data);
-        br.consume_bits(consumed);
-
-        for px in px..n_pixels {
-            let bp_start = br.position();
-
-            // Fast LUT path: peek the next `LUT_BITS` bits if available.
-            if br.has_bits(lut_bits) {
-                let key = br.peek_bits(lut_bits) as usize;
-                let entry = self.lut[key];
-                if entry.len <= LUT_BITS {
-                    // Guard: the symbol's true length must still fit in
-                    // the unread tail of the stream. (Padding bits ARE
-                    // zero per `spec/05` §4.3 and would otherwise
-                    // wedge here; the slice-bit budget is the bound.)
-                    let l = entry.len as usize;
-                    if !br.has_bits(l) {
-                        return Err(Error::SliceTruncated {
-                            bit_position: bp_start,
-                            expected_pixels: n_pixels,
-                            decoded: px,
-                        });
-                    }
-                    out.push(entry.sym);
-                    br.consume_bits(l);
-                    continue;
+        // Remainder: at most one symbol, or whatever the last (up to
+        // two) words hold. Careful refill, then the same one-symbol
+        // probe; once the data is exhausted and fewer than `max_len`
+        // bits remain, the length-by-length walk.
+        'refill: while px < n_pixels {
+            while acc_len <= 32 {
+                if let Some(w) = words.get(next_word) {
+                    acc |= u64::from(u32::from_le_bytes(*w)) << (32 - acc_len);
+                    acc_len += 32;
+                    next_word += 1;
+                } else if partial_pending {
+                    let mut buf = [0u8; 4];
+                    buf[..rest.len()].copy_from_slice(rest);
+                    let w = u32::from_le_bytes(buf) & (u32::MAX << (32 - partial_bits));
+                    acc |= u64::from(w) << (32 - acc_len);
+                    acc_len += partial_bits;
+                    partial_loaded = partial_bits;
+                    partial_pending = false;
+                } else {
+                    break;
                 }
-                // entry.len == LUT_MISS sentinel (0xff) -> longer than
-                // LUT_BITS. Fall through to the slow path.
             }
+            if acc_len < max_len {
+                break; // data exhausted: finish below
+            }
+            while acc_len >= max_len {
+                let entry = lut[(acc >> (64 - u32::from(LUT_BITS))) as usize];
+                let len = if entry.len <= LUT_BITS {
+                    out[px] = entry.sym;
+                    u32::from(entry.len)
+                } else {
+                    match self.search_tiers(acc, u32::from(LUT_BITS) + 1, max_len) {
+                        TierHit::Code(sym, len) => {
+                            out[px] = sym;
+                            len
+                        }
+                        _ => {
+                            return Err(Error::HuffmanDecodeFailure {
+                                bit_position: next_word * 32 + partial_loaded as usize
+                                    - acc_len as usize,
+                            });
+                        }
+                    }
+                };
+                acc <<= len;
+                acc_len -= len;
+                px += 1;
+                if px == n_pixels {
+                    break 'refill;
+                }
+            }
+        }
 
-            // Slow path: bit-by-bit prefix scan across length tiers,
-            // shortest first.
-            let mut matched: Option<u8> = None;
-            for (l, tier) in &tiers {
-                if !br.has_bits(*l as usize) {
+        // End of data with fewer than `max_len` bits left.
+        while px < n_pixels {
+            let bit_position = next_word * 32 + partial_loaded as usize - acc_len as usize;
+            match self.search_tiers(acc, 1, acc_len) {
+                TierHit::Code(sym, len) => {
+                    out[px] = sym;
+                    acc <<= len;
+                    acc_len -= len;
+                    px += 1;
+                }
+                TierHit::NeedsMoreBits => {
                     return Err(Error::SliceTruncated {
-                        bit_position: bp_start,
+                        bit_position,
                         expected_pixels: n_pixels,
                         decoded: px,
                     });
                 }
-                let candidate = br.peek_bits(*l as usize);
-                if let Ok(idx) = tier.binary_search_by(|probe| probe.1.cmp(&candidate)) {
-                    matched = Some(tier[idx].2);
-                    br.consume_bits(*l as usize);
-                    break;
-                }
-            }
-            match matched {
-                Some(sym) => out.push(sym),
-                None => {
-                    return Err(Error::HuffmanDecodeFailure {
-                        bit_position: bp_start,
-                    });
-                }
+                TierHit::NoCode => return Err(Error::HuffmanDecodeFailure { bit_position }),
             }
         }
-        Ok((out, br.position()))
+        Ok(next_word * 32 + partial_loaded as usize - acc_len as usize)
+    }
+
+    /// Match the left-aligned bits of `acc` against the codes whose
+    /// length lies in `min_len..=avail`, shortest first. A tier longer
+    /// than `avail` reports [`TierHit::NeedsMoreBits`]; running out of
+    /// tiers reports [`TierHit::NoCode`].
+    #[inline]
+    fn search_tiers(&self, acc: u64, min_len: u32, avail: u32) -> TierHit {
+        for &(tier_len, start, end) in &self.tiers {
+            let tier_len = u32::from(tier_len);
+            if tier_len < min_len {
+                continue;
+            }
+            if tier_len > avail {
+                return TierHit::NeedsMoreBits;
+            }
+            let candidate = (acc >> (64 - tier_len)) as u32;
+            let tier = &self.by_length[start as usize..end as usize];
+            if let Ok(i) = tier.binary_search_by(|probe| probe.1.cmp(&candidate)) {
+                return TierHit::Code(tier[i].2, tier_len);
+            }
+        }
+        TierHit::NoCode
     }
 
     /// Slice decode for a table holding codes longer than
@@ -558,23 +584,23 @@ impl HuffmanTable {
         &self,
         serial: &SerialCode,
         slice_data: &[u8],
-        n_pixels: usize,
-    ) -> Result<(Vec<u8>, usize)> {
+        out: &mut [u8],
+    ) -> Result<usize> {
+        let n_pixels = out.len();
         let mut br = BitReader::new(slice_data);
-        let mut out = Vec::with_capacity(n_pixels);
         let lut_bits = LUT_BITS as usize;
-        for px in 0..n_pixels {
+        for (px, slot) in out.iter_mut().enumerate() {
             if br.has_bits(lut_bits) {
                 let entry = self.lut[br.peek_bits(lut_bits) as usize];
                 if entry.len <= LUT_BITS {
-                    out.push(entry.sym);
+                    *slot = entry.sym;
                     br.consume_bits(entry.len as usize);
                     continue;
                 }
             }
             let bp_start = br.position();
             match serial.decode_one(&mut br) {
-                Some(sym) => out.push(sym),
+                Some(sym) => *slot = sym,
                 None => {
                     return Err(Error::SliceTruncated {
                         bit_position: bp_start,
@@ -584,7 +610,7 @@ impl HuffmanTable {
                 }
             }
         }
-        Ok((out, br.position()))
+        Ok(br.position())
     }
 
     /// Maximum non-sentinel code length in this table. 0 for the
@@ -603,6 +629,41 @@ impl HuffmanTable {
 /// whose top `len` bits equal `code` with `(sym, len)`. This is
 /// the standard width-extension trick: the slot's index, read MSB
 /// first as `LUT_BITS` bits, has the `len`-bit code as its prefix.
+/// Marker in the first-length field of a [`build_pair_lut`] entry: the
+/// first code at this index is longer than `LUT_BITS`.
+const PAIR_MISS: u32 = 0xff;
+
+/// Derive the two-symbol table from the one-symbol table.
+///
+/// Entry layout, low byte first: first symbol, second symbol, total
+/// bits consumed, first code's length (or [`PAIR_MISS`]). When a second
+/// complete code fits in the `LUT_BITS - first_len` index bits that
+/// follow the first code, the entry carries both and `total` is the sum
+/// of the two lengths; otherwise `total == first_len` and the second
+/// symbol byte is unspecified. One probe then yields one or two
+/// symbols, which shortens the per-symbol serial dependency (index →
+/// load → shift) for the short codes that dominate real pictures.
+fn build_pair_lut(lut: &[LutEntry]) -> Vec<u32> {
+    let mask = lut.len() - 1;
+    lut.iter()
+        .enumerate()
+        .map(|(key, first)| {
+            if first.len > LUT_BITS {
+                return PAIR_MISS << 24;
+            }
+            let first_len = u32::from(first.len);
+            let second = lut[(key << first.len) & mask];
+            let room = u32::from(LUT_BITS) - first_len;
+            let (second_sym, total) = if u32::from(second.len) <= room {
+                (u32::from(second.sym), first_len + u32::from(second.len))
+            } else {
+                (0, first_len)
+            };
+            u32::from(first.sym) | (second_sym << 8) | (total << 16) | (first_len << 24)
+        })
+        .collect()
+}
+
 fn build_lut(by_length: &[RevEntry]) -> Vec<LutEntry> {
     let size = 1usize << LUT_BITS;
     let mut lut = vec![LUT_MISS; size];
