@@ -913,23 +913,17 @@ pub fn peek_frame(cfg: &StreamConfig, chunk_payload: &[u8]) -> Result<FrameLayou
         }
 
         // Build per-slice absolute extents + decode-free row range
-        // per `spec/02` §5.2:
-        //   row_start[s] = floor((plane_height * s) / num_slices)
-        //   row_end[s]   = floor((plane_height * (s + 1)) / num_slices)
-        // The product `plane_height * num_slices` fits in u64 in every
-        // reachable case (plane_height capped by `Hp <= 65535 *
-        // chroma-step` per `spec/01` §4.4.1, num_slices `<= 256` per
-        // `spec/02` §5.3 — the round-241 max product is well below
-        // u64::MAX), but we widen to u64 explicitly so the typed
-        // accessor is overflow-safe on the architectural upper bound.
+        // per `spec/02` §5.2, applied on the plane's slice-boundary row
+        // grid (`Fourcc::slice_row_step`: 4:2:0 luma slices start on
+        // even rows so each holds whole chroma rows). Same helper the
+        // decoder uses, so the two walks cannot drift.
         let mut slices: Vec<SliceLayout> = Vec::with_capacity(num_slices);
         let mut prev_rel = 0usize;
-        let ph64 = u64::from(ph);
-        let ns64 = num_slices as u64;
         let pw32 = pw;
+        let row_step = cfg.fourcc.slice_row_step(plane_idx);
         for (s_idx, &end_rel) in end_offsets.iter().enumerate() {
-            let row_start = (ph64 * s_idx as u64) / ns64;
-            let row_end = (ph64 * (s_idx as u64 + 1)) / ns64;
+            let (row_start, row_end) =
+                crate::fourcc::slice_row_range(ph as usize, row_step, num_slices, s_idx);
             let row_count = row_end - row_start;
             slices.push(SliceLayout {
                 start: slice_data_start + prev_rel,

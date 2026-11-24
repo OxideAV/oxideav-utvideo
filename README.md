@@ -9,17 +9,45 @@ Clean-room implementation against the spec under
 
 ## Status
 
-Decode and encode are both functional at roughly **98%** coverage of
-the classic 8-bit FourCC family, validated against a committed
-reference-stream golden corpus: real frame bodies decode byte-exact,
-and this crate's own streams — including gradient (mode 2) and
-128-slice partitionings the reference encoder cannot produce — were
-verified accepted by the black-box reference decoder with byte-exact
-pixel reconstruction. The crate is codec-only: AVI / VfW
-container handling (including the FourCC + extradata that identifies a
-Ut Video stream on the wire) lives in `oxideav-avi`. Callers hand in a
-parsed `StreamConfig` + frame bytes; the codec returns per-plane
-samples (decode) or chunk-payload bytes (encode).
+Decoder and encoder for the five 8-bit FourCCs the spec documents
+(`ULY0` / `ULY2` / `ULY4` / `ULRG` / `ULRA`), measured against a **live
+black-box matrix** (`tests/blackbox_matrix.rs`; generated at test time,
+skipped when the `ffmpeg` executable is absent):
+
+| Direction | Cells | Result |
+| --------- | ----- | ------ |
+| black-box encoder → this decoder | 7 469 | **6 858 / 6 858** verifiable cells bit-exact (vs the black-box decoder *and* the source picture); 611 cells have no oracle — the black-box decoder rejects the black-box encoder's own stream |
+| this encoder → black-box decoder | 9 565 | **9 565 / 9 565** accepted with an empty warning log and bit-exact |
+
+The sweep covers every pixel layout the black-box encoder takes
+(`yuv420p` / `yuv422p` / `yuv444p` / `gbrp` / `gbrap`), every predictor
+it offers (none / left / median — plus gradient in the encode
+direction), every slice count the format allows on a 16×262 picture
+(1 … 131 for 4:2:0, 1 … 256 otherwise, most of which do not divide the
+height), 1×1 to 4096×2160 pictures including odd and one-pixel-wide
+ones, flat / mid-grey / noise / ramp / sparse / checker / soft / skewed
+content (single-symbol planes, uniform 8-bit tables, deep code tables)
+and 150-frame streams. On the cells both encoders can produce, this
+encoder's output is within 0.01 % of the black-box encoder's size.
+
+The 611 oracle-less cells are all multi-slice, never 4:2:0, and mostly
+tiny or incompressible pictures: the black-box encoder writes a frame
+its own decoder refuses ("Incorrect slice size" / "Insufficient data
+for a plane"). This crate rejects or mis-decodes those frames too
+(none decodes to the source picture), and its own encoder covers the
+same option cells in the other direction.
+
+**Never verified against an outside stream:** gradient prediction in
+the decode direction (the black-box encoder does not offer it; the
+black-box decoder does accept this crate's gradient streams), slice
+counts above the smallest plane height, and anything outside the five
+FourCCs below.
+
+The crate is codec-only: AVI / VfW container handling (including the
+FourCC + extradata that identifies a Ut Video stream on the wire) lives
+in `oxideav-avi`. Callers hand in a parsed `StreamConfig` + frame
+bytes; the codec returns per-plane samples (decode) or chunk-payload
+bytes (encode).
 
 ### Supported
 
@@ -28,7 +56,9 @@ The five classic 8-bit FourCCs documented in the spec:
 `Ulra` (RGBA). All four spatial predictors (None / Left / Gradient /
 Median, spec §04, with the per-slice `+128` first-pixel seed), the
 per-plane canonical-Huffman codebooks (spec §05), per-slice
-partitioning (spec §02), and RGB inter-plane decorrelation (spec §04
+partitioning (spec §02 — on the vertically-subsampled row grid, so a
+4:2:0 luma slice always starts on an even row and holds whole chroma
+rows), and RGB inter-plane decorrelation (spec §04
 §6) are implemented. Both decode and encode have a slice-parallel path
 gated on a caller-granted worker budget (see **Threading** below).
 The trait-path encoder picks a predictor per frame with a

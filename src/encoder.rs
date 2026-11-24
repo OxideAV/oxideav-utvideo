@@ -45,7 +45,7 @@
 //! called.
 
 use crate::error::{Error, Result};
-use crate::fourcc::{Fourcc, Predictor};
+use crate::fourcc::{Fourcc, Predictor, slice_row_range};
 use crate::huffman::{BitWriter, HuffmanTable};
 use crate::predict;
 
@@ -152,7 +152,14 @@ pub fn encode_frame_serial(frame: &EncodedFrame) -> Result<Vec<u8>> {
         let (pw, ph) = frame.fourcc.plane_dim(i, frame.width, frame.height);
         let pw = pw as usize;
         let ph = ph as usize;
-        let slice_residuals = predict::forward(frame.predictor, plane, pw, ph, frame.num_slices);
+        let slice_residuals = predict::forward_on_row_grid(
+            frame.predictor,
+            plane,
+            pw,
+            ph,
+            frame.fourcc.slice_row_step(i),
+            frame.num_slices,
+        );
         let (descriptor, table) = build_plane_huffman(&slice_residuals)?;
         let blob = encode_plane_serial(&descriptor, &table, &slice_residuals, frame.num_slices)?;
         plane_blobs.push(blob);
@@ -178,8 +185,15 @@ pub fn encode_frame_parallel(frame: &EncodedFrame, workers: usize) -> Result<Vec
         let (pw, ph) = frame.fourcc.plane_dim(i, frame.width, frame.height);
         let pw = pw as usize;
         let ph = ph as usize;
-        let slice_residuals =
-            forward_parallel(frame.predictor, plane, pw, ph, frame.num_slices, workers);
+        let slice_residuals = forward_parallel(
+            frame.predictor,
+            plane,
+            pw,
+            ph,
+            frame.fourcc.slice_row_step(i),
+            frame.num_slices,
+            workers,
+        );
         let (descriptor, table) = build_plane_huffman(&slice_residuals)?;
         let blob = encode_plane_parallel(
             &descriptor,
@@ -275,6 +289,7 @@ fn forward_parallel(
     plane: &[u8],
     width: usize,
     plane_height: usize,
+    row_step: usize,
     num_slices: usize,
     workers: usize,
 ) -> Vec<Vec<u8>> {
@@ -282,15 +297,20 @@ fn forward_parallel(
     // is deliberately NOT queried (threading contract).
     let par = workers.min(num_slices).max(1);
     if par <= 1 || num_slices <= 1 {
-        return predict::forward(pred, plane, width, plane_height, num_slices);
+        return predict::forward_on_row_grid(
+            pred,
+            plane,
+            width,
+            plane_height,
+            row_step,
+            num_slices,
+        );
     }
 
     // Build (r_start, r_end) tuples on the parent thread.
     let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(num_slices);
     for s in 0..num_slices {
-        let r_start = (plane_height * s) / num_slices;
-        let r_end = (plane_height * (s + 1)) / num_slices;
-        ranges.push((r_start, r_end));
+        ranges.push(slice_row_range(plane_height, row_step, num_slices, s));
     }
 
     // Pre-size the output Vec so each thread writes into its own slot

@@ -95,6 +95,42 @@ impl Fourcc {
         }
     }
 
+    /// Row granularity of slice boundaries in plane `idx`.
+    ///
+    /// Slice boundaries are placed on the **vertically-subsampled row
+    /// grid** of the frame: for `ULY0` (4:2:0) a luma slice always
+    /// starts on an even luma row, so that every slice holds whole
+    /// chroma rows and the luma / chroma slices of one index cover the
+    /// same picture band. The luma plane of `ULY0` therefore has a step
+    /// of 2; every other plane of every FourCC has a step of 1.
+    ///
+    /// `spec/02` §5.2 states the partition per plane height, which is
+    /// the same thing for every plane except 4:2:0 luma under a slice
+    /// count that does not divide the chroma height; the step here is
+    /// pinned by black-box decode equality on such streams (see
+    /// `tests/blackbox_matrix.rs` and the committed pins in
+    /// `tests/slice_partition_420.rs`).
+    pub fn slice_row_step(self, idx: usize) -> usize {
+        match (self, idx) {
+            (Fourcc::Uly0, 0) => 2,
+            _ => 1,
+        }
+    }
+
+    /// Rows `[start, end)` of slice `n` (of `num_slices`) in plane
+    /// `idx` of a frame `height` rows tall. See
+    /// [`Fourcc::slice_row_step`] for the 4:2:0 luma rule.
+    pub fn slice_rows(
+        self,
+        idx: usize,
+        height: u32,
+        num_slices: usize,
+        n: usize,
+    ) -> (usize, usize) {
+        let (_, ph) = self.plane_dim(idx, 2, height);
+        slice_row_range(ph as usize, self.slice_row_step(idx), num_slices, n)
+    }
+
     /// The 4-byte source-format tag written at extradata
     /// offset `+0x04` for this FOURCC, per `spec/01` §2.2 + §5 (test
     /// set `T1`):
@@ -140,6 +176,35 @@ impl Fourcc {
             _ => Ok(()),
         }
     }
+}
+
+/// Rows `[start, end)` covered by slice `n` of `num_slices` in a plane
+/// `plane_height` rows tall whose slice boundaries fall on multiples of
+/// `row_step` rows (`spec/02` §5.2 applied on the `plane_height /
+/// row_step` grid; see [`Fourcc::slice_row_step`]).
+///
+/// The last slice always ends at `plane_height`, and `n >= num_slices`
+/// or `num_slices == 0` yields an empty range at the plane's end, so
+/// the function is total.
+#[doc(hidden)]
+pub fn slice_row_range(
+    plane_height: usize,
+    row_step: usize,
+    num_slices: usize,
+    n: usize,
+) -> (usize, usize) {
+    if num_slices == 0 || n >= num_slices {
+        return (plane_height, plane_height);
+    }
+    let step = row_step.max(1);
+    let units = plane_height / step;
+    let start = (units * n / num_slices) * step;
+    let end = if n + 1 == num_slices {
+        plane_height
+    } else {
+        (units * (n + 1) / num_slices) * step
+    };
+    (start, end)
 }
 
 /// Wire prediction mode pulled from the per-frame info dword,

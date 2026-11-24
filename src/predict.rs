@@ -13,7 +13,7 @@
 //!   `B=sample[r-1,0]`, `C=sample[r-2,W-1]` (degenerates to `B` on
 //!   row 1 of a slice when no `r-2` is available inside the slice).
 
-use crate::fourcc::Predictor;
+use crate::fourcc::{Predictor, slice_row_range};
 
 /// Ut Video median predictor (`spec/04` §5.0):
 /// `P = median(A, B, (A + B - C) mod 256)`.
@@ -282,11 +282,24 @@ pub fn forward(
     plane_height: usize,
     num_slices: usize,
 ) -> Vec<Vec<u8>> {
+    forward_on_row_grid(pred, plane, width, plane_height, 1, num_slices)
+}
+
+/// [`forward`] with slice boundaries placed on multiples of `row_step`
+/// rows (2 for the luma plane of a 4:2:0 stream, 1 otherwise — see
+/// [`crate::fourcc::Fourcc::slice_row_step`]).
+pub fn forward_on_row_grid(
+    pred: Predictor,
+    plane: &[u8],
+    width: usize,
+    plane_height: usize,
+    row_step: usize,
+    num_slices: usize,
+) -> Vec<Vec<u8>> {
     debug_assert_eq!(plane.len(), width * plane_height);
     let mut out = Vec::with_capacity(num_slices);
     for s_idx in 0..num_slices {
-        let r_start = (plane_height * s_idx) / num_slices;
-        let r_end = (plane_height * (s_idx + 1)) / num_slices;
+        let (r_start, r_end) = slice_row_range(plane_height, row_step, num_slices, s_idx);
         out.push(forward_slice(pred, plane, width, r_start, r_end));
     }
     out

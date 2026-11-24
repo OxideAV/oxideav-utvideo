@@ -43,7 +43,7 @@
 //! display order before the RGB inverse-decorrelation pass runs.
 
 use crate::error::{Error, Result};
-use crate::fourcc::{Fourcc, Predictor, StreamConfig};
+use crate::fourcc::{Fourcc, Predictor, StreamConfig, slice_row_range};
 use crate::huffman::HuffmanTable;
 use crate::predict;
 
@@ -241,6 +241,8 @@ struct ParsedPlane<'a> {
     label: PlaneLabel,
     width: usize,
     height: usize,
+    /// Slice-boundary row granularity ([`Fourcc::slice_row_step`]).
+    row_step: usize,
     table: HuffmanTable,
     /// Per-slice raw bytes (length == `num_slices`).
     slice_bytes: Vec<&'a [u8]>,
@@ -355,6 +357,7 @@ fn parse_payload<'a>(cfg: &StreamConfig, chunk_payload: &'a [u8]) -> Result<Pars
             label: PlaneLabel::for_fourcc(cfg.fourcc, plane_idx),
             width: pw,
             height: ph,
+            row_step: cfg.fourcc.slice_row_step(plane_idx),
             table,
             slice_bytes,
         });
@@ -393,26 +396,9 @@ fn finish_decode(
         let mut samples = vec![0u8; pw * ph];
 
         if workers > 1 && num_slices > 1 {
-            decode_plane_parallel(
-                &plane.table,
-                &plane.slice_bytes,
-                num_slices,
-                pw,
-                ph,
-                predictor,
-                workers,
-                &mut samples,
-            )?;
+            decode_plane_parallel(&plane, num_slices, predictor, workers, &mut samples)?;
         } else {
-            decode_plane_serial(
-                &plane.table,
-                &plane.slice_bytes,
-                num_slices,
-                pw,
-                ph,
-                predictor,
-                &mut samples,
-            )?;
+            decode_plane_serial(&plane, num_slices, predictor, &mut samples)?;
         }
 
         decoded_planes.push(DecodedPlane {
@@ -456,16 +442,7 @@ fn finish_decode_strict(cfg: &StreamConfig, parsed: ParsedFrame<'_>) -> Result<D
         let ph = plane.height;
         let mut samples = vec![0u8; pw * ph];
 
-        decode_plane_serial_strict(
-            &plane.table,
-            &plane.slice_bytes,
-            num_slices,
-            pw,
-            ph,
-            predictor,
-            plane_idx,
-            &mut samples,
-        )?;
+        decode_plane_serial_strict(&plane, num_slices, predictor, plane_idx, &mut samples)?;
 
         decoded_planes.push(DecodedPlane {
             label: plane.label,
@@ -496,19 +473,17 @@ fn finish_decode_strict(cfg: &StreamConfig, parsed: ParsedFrame<'_>) -> Result<D
 /// Serial-path per-plane decode: decode each slice, then inverse-predict
 /// directly into the per-slice row range of `out`.
 fn decode_plane_serial(
-    table: &HuffmanTable,
-    slice_bytes: &[&[u8]],
+    plane: &ParsedPlane<'_>,
     num_slices: usize,
-    pw: usize,
-    ph: usize,
     predictor: Predictor,
     out: &mut [u8],
 ) -> Result<()> {
+    let (table, slice_bytes) = (&plane.table, &plane.slice_bytes);
+    let (pw, ph, row_step) = (plane.width, plane.height, plane.row_step);
     debug_assert_eq!(slice_bytes.len(), num_slices);
     debug_assert_eq!(out.len(), pw * ph);
     for (s, sb) in slice_bytes.iter().enumerate().take(num_slices) {
-        let r_start = (ph * s) / num_slices;
-        let r_end = (ph * (s + 1)) / num_slices;
+        let (r_start, r_end) = slice_row_range(ph, row_step, num_slices, s);
         let rows = r_end - r_start;
         let n_pixels = rows * pw;
         if n_pixels == 0 {
@@ -525,22 +500,19 @@ fn decode_plane_serial(
 /// [`HuffmanTable::decode_slice_strict`], which verifies the slice's
 /// trailing word-boundary padding is zero (`spec/05` §4.3). `plane_idx`
 /// is threaded through only to locate a [`Error::NonZeroPadding`].
-#[allow(clippy::too_many_arguments)]
 fn decode_plane_serial_strict(
-    table: &HuffmanTable,
-    slice_bytes: &[&[u8]],
+    plane: &ParsedPlane<'_>,
     num_slices: usize,
-    pw: usize,
-    ph: usize,
     predictor: Predictor,
     plane_idx: usize,
     out: &mut [u8],
 ) -> Result<()> {
+    let (table, slice_bytes) = (&plane.table, &plane.slice_bytes);
+    let (pw, ph, row_step) = (plane.width, plane.height, plane.row_step);
     debug_assert_eq!(slice_bytes.len(), num_slices);
     debug_assert_eq!(out.len(), pw * ph);
     for (s, sb) in slice_bytes.iter().enumerate().take(num_slices) {
-        let r_start = (ph * s) / num_slices;
-        let r_end = (ph * (s + 1)) / num_slices;
+        let (r_start, r_end) = slice_row_range(ph, row_step, num_slices, s);
         let rows = r_end - r_start;
         let n_pixels = rows * pw;
         if n_pixels == 0 {
@@ -558,17 +530,15 @@ fn decode_plane_serial_strict(
 /// row-wise (`split_at_mut`) so every thread owns a disjoint
 /// `slice_rows * pw` mutable strip. Errors propagate via the join
 /// — the first failing slice wins.
-#[allow(clippy::too_many_arguments)]
 fn decode_plane_parallel(
-    table: &HuffmanTable,
-    slice_bytes: &[&[u8]],
+    plane: &ParsedPlane<'_>,
     num_slices: usize,
-    pw: usize,
-    ph: usize,
     predictor: Predictor,
     workers: usize,
     out: &mut [u8],
 ) -> Result<()> {
+    let (table, slice_bytes) = (&plane.table, &plane.slice_bytes);
+    let (pw, ph, row_step) = (plane.width, plane.height, plane.row_step);
     debug_assert_eq!(slice_bytes.len(), num_slices);
     debug_assert_eq!(out.len(), pw * ph);
 
@@ -576,8 +546,7 @@ fn decode_plane_parallel(
     // into disjoint row strips, one per slice.
     let mut strip_specs: Vec<(usize, usize)> = Vec::with_capacity(num_slices);
     for s in 0..num_slices {
-        let r_start = (ph * s) / num_slices;
-        let r_end = (ph * (s + 1)) / num_slices;
+        let (r_start, r_end) = slice_row_range(ph, row_step, num_slices, s);
         strip_specs.push((r_start, r_end - r_start));
     }
 
