@@ -21,6 +21,9 @@
 
 #![cfg(feature = "registry")]
 
+use oxideav_core::options::{
+    CodecOptionsStruct, OptionField, OptionKind, OptionValue, parse_options,
+};
 use oxideav_core::{
     CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry, CodecTag, Decoder,
     Encoder, Error as CoreError, ExecutionContext, Frame, Packet, PixelFormat,
@@ -59,6 +62,7 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .capabilities(caps)
             .decoder(make_decoder)
             .encoder(make_encoder)
+            .encoder_options::<UtVideoEncoderOptions>()
             .tags([
                 CodecTag::fourcc(b"ULRG"),
                 CodecTag::fourcc(b"ULRA"),
@@ -152,6 +156,22 @@ impl Decoder for UtVideoDecoder {
         self.threads = ctx.threads.max(1);
     }
 
+    /// Frame shape, known from the FourCC + dimensions as soon as the
+    /// stream is configured: planar 8-bit, in wire plane order
+    /// (Y, U, V or G, B, R[, A]). Fixed for the stream's lifetime.
+    fn output_params(&self) -> Option<CodecParameters> {
+        let cfg = self.cfg.as_ref()?;
+        let mut p = CodecParameters::video(self.codec_id.clone());
+        p.width = Some(cfg.width);
+        p.height = Some(cfg.height);
+        p.pixel_format = Some(pixel_format_for(cfg.fourcc));
+        Some(p)
+    }
+
+    fn output_pixel_format(&self) -> Option<PixelFormat> {
+        self.cfg.as_ref().map(|cfg| pixel_format_for(cfg.fourcc))
+    }
+
     fn send_packet(&mut self, packet: &Packet) -> CoreResult<()> {
         if self.pending.is_some() {
             return Err(CoreError::other(
@@ -224,16 +244,100 @@ fn map_to_video_frame(frame: DecodedFrame, pts: Option<i64>) -> VideoFrame {
 
 /// Map a [`PixelFormat`] to the corresponding classic-family
 /// [`Fourcc`]. The YUV trio routes by chroma subsampling
-/// (`spec/02` §3.1). RGB / packed formats are not mapped: ULRG and
-/// ULRA carry **planar** GBR / GBRA on the wire (`spec/04` §6 +
-/// `spec/02` §3.1), so a caller asking for those must declare it via
-/// `params.tag` and hand in three / four 8-bit planes.
+/// (`spec/02` §3.1); 8-bit planar GBR / GBRA are exactly the ULRG /
+/// ULRA wire layout (`spec/02` §3: planes G, B, R[, A]). Packed RGB is
+/// not mapped — the codec takes planes.
 fn fourcc_from_pixel_format(fmt: PixelFormat) -> Option<Fourcc> {
     match fmt {
         PixelFormat::Yuv420P => Some(Fourcc::Uly0),
         PixelFormat::Yuv422P => Some(Fourcc::Uly2),
         PixelFormat::Yuv444P => Some(Fourcc::Uly4),
+        PixelFormat::Gbrp8 => Some(Fourcc::Ulrg),
+        PixelFormat::Gbrap8 => Some(Fourcc::Ulra),
         _ => None,
+    }
+}
+
+/// The frame layout of a FourCC: inverse of [`fourcc_from_pixel_format`].
+fn pixel_format_for(fourcc: Fourcc) -> PixelFormat {
+    match fourcc {
+        Fourcc::Uly0 => PixelFormat::Yuv420P,
+        Fourcc::Uly2 => PixelFormat::Yuv422P,
+        Fourcc::Uly4 => PixelFormat::Yuv444P,
+        Fourcc::Ulrg => PixelFormat::Gbrp8,
+        Fourcc::Ulra => PixelFormat::Gbrap8,
+    }
+}
+
+/// Encoder options accepted through `CodecParameters::options`.
+///
+/// | key      | values                                         | default |
+/// |----------|------------------------------------------------|---------|
+/// | `slices` | `0` (keep the extradata's count, else 1) … 256 | `0`     |
+/// | `pred`   | `auto` / `none` / `left` / `gradient` / `median` | `auto` |
+///
+/// `slices` may not exceed the smallest plane's height. `pred = auto`
+/// picks a predictor per frame from the picture content.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct UtVideoEncoderOptions {
+    /// Slice count; `0` keeps the count carried by the extradata (one
+    /// slice when no extradata is supplied).
+    pub slices: u32,
+    /// Fixed predictor, or `None` for the per-frame choice.
+    pub predictor: Option<Predictor>,
+}
+
+impl UtVideoEncoderOptions {
+    /// Defaults: slice count from the extradata, per-frame predictor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the slice count (`0` = from the extradata, else one).
+    pub fn with_slices(mut self, slices: u32) -> Self {
+        self.slices = slices;
+        self
+    }
+
+    /// Pin the predictor (`None` = per-frame choice).
+    pub fn with_predictor(mut self, predictor: Option<Predictor>) -> Self {
+        self.predictor = predictor;
+        self
+    }
+}
+
+impl CodecOptionsStruct for UtVideoEncoderOptions {
+    const SCHEMA: &'static [OptionField] = &[
+        OptionField {
+            name: "slices",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "slices per plane, 1-256 (0 = from extradata, else 1)",
+        },
+        OptionField {
+            name: "pred",
+            kind: OptionKind::Enum(&["auto", "none", "left", "gradient", "median"]),
+            default: OptionValue::String(String::new()),
+            help: "spatial predictor; default auto = chosen per frame",
+        },
+    ];
+
+    fn apply(&mut self, key: &str, value: &OptionValue) -> CoreResult<()> {
+        match key {
+            "slices" => self.slices = value.as_u32()?,
+            "pred" => {
+                self.predictor = match value.as_str()? {
+                    "none" => Some(Predictor::None),
+                    "left" => Some(Predictor::Left),
+                    "gradient" => Some(Predictor::Gradient),
+                    "median" => Some(Predictor::Median),
+                    _ => None,
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -246,7 +350,10 @@ fn fourcc_from_pixel_format(fmt: PixelFormat) -> Option<Fourcc> {
 /// [`Extradata::canonical_extradata_for`] so encoder construction stays a
 /// single-call API for callers driving us through the framework's
 /// [`Encoder`] trait without staging a separate extradata builder.
-fn build_encoder_config(params: &CodecParameters) -> CoreResult<StreamConfig> {
+fn build_encoder_config(
+    params: &CodecParameters,
+    options: &UtVideoEncoderOptions,
+) -> CoreResult<StreamConfig> {
     let fourcc = match fourcc_from_params(params) {
         Some(fc) => fc,
         None => match params.pixel_format {
@@ -268,7 +375,7 @@ fn build_encoder_config(params: &CodecParameters) -> CoreResult<StreamConfig> {
             "oxideav-utvideo: encoder needs CodecParameters::width / height",
         ));
     };
-    let extradata = if params.extradata.is_empty() {
+    let mut extradata = if params.extradata.is_empty() {
         // Synthesise a default-slice (single-slice) extradata so callers
         // can drive the encoder without first plumbing an extradata
         // builder. Containers that round-trip a populated extradata
@@ -280,16 +387,40 @@ fn build_encoder_config(params: &CodecParameters) -> CoreResult<StreamConfig> {
         Extradata::parse(&params.extradata)
             .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?
     };
-    StreamConfig::new(fourcc, width, height, extradata)
-        .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))
+    if options.slices != 0 {
+        if options.slices > 256 {
+            return Err(CoreError::invalid(format!(
+                "oxideav-utvideo: slices = {} exceeds the format maximum of 256",
+                options.slices
+            )));
+        }
+        // Slice count lives in the top byte of the flags (`spec/01` §2.4.3).
+        extradata.flags = (extradata.flags & 0x00ff_ffff) | ((options.slices - 1) << 24);
+    }
+    let cfg = StreamConfig::new(fourcc, width, height, extradata)
+        .map_err(|e| CoreError::invalid(format!("oxideav-utvideo: {e}")))?;
+    // Refuse at construction what `encode_frame` would refuse on the
+    // first frame: more slices than the smallest plane has rows.
+    let min_plane_height = (0..fourcc.plane_count())
+        .map(|i| fourcc.plane_dim(i, width, height).1 as usize)
+        .min()
+        .unwrap_or(0);
+    if options.slices != 0 && cfg.num_slices() > min_plane_height {
+        return Err(CoreError::invalid(format!(
+            "oxideav-utvideo: slices = {} exceeds the smallest plane height {min_plane_height}",
+            cfg.num_slices()
+        )));
+    }
+    Ok(cfg)
 }
 
 fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
-    let cfg = build_encoder_config(params)?;
+    let options: UtVideoEncoderOptions = parse_options(&params.options)?;
+    let cfg = build_encoder_config(params, &options)?;
     let mut out_params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
     out_params.width = Some(cfg.width);
     out_params.height = Some(cfg.height);
-    out_params.pixel_format = params.pixel_format;
+    out_params.pixel_format = Some(pixel_format_for(cfg.fourcc));
     out_params.tag = Some(CodecTag::fourcc(cfg.fourcc.as_bytes()));
     out_params.extradata = cfg.extradata.to_bytes().to_vec();
     Ok(Box::new(UtVideoEncoder {
@@ -299,8 +430,8 @@ fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
         // (`predict::choose_predictor`). `None` here means "let the
         // heuristic decide each frame at `send_frame` time"; callers
         // that want to pin a specific predictor downcast and call
-        // [`UtVideoEncoder::set_predictor`].
-        predictor_override: None,
+        // [`UtVideoEncoder::set_predictor`] or pass the `pred` option.
+        predictor_override: options.predictor,
         out_params,
         pending: None,
         eof: false,
@@ -515,7 +646,7 @@ mod tests {
             .unwrap()
             .to_bytes()
             .to_vec();
-        let cfg = build_encoder_config(&p).unwrap();
+        let cfg = build_encoder_config(&p, &UtVideoEncoderOptions::default()).unwrap();
         let mut out_params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
         out_params.width = Some(cfg.width);
         out_params.height = Some(cfg.height);
@@ -608,7 +739,7 @@ mod tests {
         // (The factory does NOT downcast — we re-derive via the helper
         // because the trait object hides the override field.)
         let _ = enc;
-        let cfg = build_encoder_config(&p).unwrap();
+        let cfg = build_encoder_config(&p, &UtVideoEncoderOptions::default()).unwrap();
         assert_eq!(cfg.fourcc, Fourcc::Uly0);
     }
 

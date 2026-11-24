@@ -153,7 +153,17 @@ the interlaced flag):
   `MalformedStream` / `ApiMisuse` / `Unsupported` / `StreamShape`
   buckets with `is_*` convenience predicates.
 - [`register`] / [`register_codecs`] — wire into `oxideav-core`'s codec
-  registry under codec id `"utvideo"`.
+  registry under codec id `"utvideo"`. The decoder reports its frame
+  shape through `output_params()` as soon as it is configured
+  (`Yuv420P` / `Yuv422P` / `Yuv444P` / `Gbrp8` / `Gbrap8`, planes in
+  wire order); the encoder selects the FourCC from those same five
+  pixel formats (or from `CodecParameters::tag`) and takes two options
+  through `CodecParameters::options` ([`UtVideoEncoderOptions`]):
+
+  | key      | values                                           | default |
+  | -------- | ------------------------------------------------ | ------- |
+  | `slices` | `1` … `256`, at most the smallest plane's height; `0` keeps the extradata's count (one slice without extradata) | `0` |
+  | `pred`   | `auto` / `none` / `left` / `gradient` / `median` | `auto` (chosen per frame) |
 
 ## Cargo features
 

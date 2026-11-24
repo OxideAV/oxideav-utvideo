@@ -417,8 +417,9 @@ fn factory_packed_rgb_pixel_format_rejected() {
     oxideav_utvideo::registry::register_codecs(&mut reg);
     let _id = CodecId::new(CODEC_ID_STR);
     // Packed RGB / RGBA cannot be silently routed to ULRG / ULRA — the
-    // wire is planar GBR(A) (`spec/04` §6). The caller must declare
-    // ULRG / ULRA via `params.tag` AND hand in 3/4 planes.
+    // wire is planar GBR(A) (`spec/04` §6). The caller declares the
+    // planar `Gbrp8` / `Gbrap8` layout (or the FourCC via `params.tag`)
+    // and hands in 3 / 4 planes.
     for fmt in [PixelFormat::Rgb24, PixelFormat::Rgba, PixelFormat::Gray8] {
         let p = build_params_with_pixfmt(fmt, 16, 16);
         match reg.first_encoder(&p) {

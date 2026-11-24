@@ -76,7 +76,7 @@ pub use crate::inspect::{FrameLayout, PlaneLayout, SliceLayout, peek_frame, peek
 
 // Framework integration — only when the `registry` feature is on.
 #[cfg(feature = "registry")]
-pub use crate::registry::{CODEC_ID_STR, register, register_codecs};
+pub use crate::registry::{CODEC_ID_STR, UtVideoEncoderOptions, register, register_codecs};
 
 #[cfg(feature = "registry")]
 oxideav_core::register!("oxideav-utvideo", register);

@@ -16,6 +16,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `tests/blackbox_matrix.rs` — live interoperability matrix against the `ffmpeg` executable in both directions (skips when the tool is absent): 7 469 foreign cells (6 858 / 6 858 verifiable bit-exact, 611 without an oracle) and 9 565 own cells (all accepted warning-free, bit-exact), with a size comparison (+0.01 %).
 - `Fourcc::slice_row_step` / `Fourcc::slice_rows` — the per-plane slice row partition.
+- Registry decoder answers `output_params()` / `output_pixel_format()` (width, height, `Yuv420P` / `Yuv422P` / `Yuv444P` / `Gbrp8` / `Gbrap8`) as soon as the stream is configured.
+- Registry encoder: `Gbrp8` / `Gbrap8` select `ULRG` / `ULRA` without a tag; `slices` and `pred` options through `CodecParameters::options` (`UtVideoEncoderOptions`), validated at construction; `output_params().pixel_format` is always set.
 
 - `new(..)` (every field, in declaration order) on `DecodedPlane`, `DecodedFrame`, `PlaneInput`, `EncodedFrame`, `Extradata`, `inspect::SliceLayout`, `inspect::PlaneLayout` and `inspect::FrameLayout` (`StreamConfig::new` already existed).
 
