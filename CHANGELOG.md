@@ -6,6 +6,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-utvideo/compare/v0.0.4...v0.0.5) - 2026-11-24
+
+### Other
+
+- list the tests added this round
+- Decode 1.35-2.5x and encode 1.9-6.2x faster, output unchanged
+- decoder output shape, planar GBR formats, encoder options
+- Decode code lengths up to 254 bits
+- Fix the 4:2:0 slice partition; add a live black-box matrix
+- API hygiene: #[non_exhaustive] on growable enums + frame / layout records, with constructors
+
 ### Fixed
 
 - **4:2:0 slice partition.** `ULY0` luma slices now start on even luma rows (`2 * floor(Hc * n / S)` with `Hc` the chroma height), so every slice holds whole chroma rows. The previous `floor(H * n / S)` on the luma height agrees only when the slice count divides the chroma height; for every other count the decoder refused (`slice truncated`) or mis-decoded streams from the black-box encoder, and the encoder wrote frames the black-box decoder mis-decoded or warned about (`N bits left after decoding slice`). Found by the new black-box matrix: 352 of 7 469 foreign cells and 429 of 9 565 own cells failed before the fix. `inspect::SliceLayout` row ranges follow the same rule. Pins: `tests/slice_partition_420.rs` + three ≤ 1 KiB foreign frames.
