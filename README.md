@@ -230,7 +230,14 @@ the interlaced flag):
 
 ## Testing
 
-The crate ships per-stage unit tests, a self-roundtrip matrix across
+Added this round: the live black-box matrix in both directions
+(`tests/blackbox_matrix.rs`, see **Status**), three committed foreign
+4:2:0 frames pinning the slice partition
+(`tests/slice_partition_420.rs`), hand-built frames at every code
+depth from 1 to 254 bits (`tests/long_codes.rs`), and the registry
+format / option surface (`tests/registry_formats_and_options.rs`).
+
+The crate also ships per-stage unit tests, a self-roundtrip matrix across
 every FourCC × predictor × slice-count combination, a cross-surface
 decode-agreement harness that asserts the five decode entry points
 (serial default / budgeted / forced-serial / forced-parallel / strict)
