@@ -10,6 +10,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **4:2:0 slice partition.** `ULY0` luma slices now start on even luma rows (`2 * floor(Hc * n / S)` with `Hc` the chroma height), so every slice holds whole chroma rows. The previous `floor(H * n / S)` on the luma height agrees only when the slice count divides the chroma height; for every other count the decoder refused (`slice truncated`) or mis-decoded streams from the black-box encoder, and the encoder wrote frames the black-box decoder mis-decoded or warned about (`N bits left after decoding slice`). Found by the new black-box matrix: 352 of 7 469 foreign cells and 429 of 9 565 own cells failed before the fix. `inspect::SliceLayout` row ranges follow the same rule. Pins: `tests/slice_partition_420.rs` + three ≤ 1 KiB foreign frames.
 
+- **Code lengths above 32 bits were refused.** The descriptor byte carries any length in 1 … 254 and a conformant decoder must take all of them (spec §05 §7.2); `HuffmanTable::build` reported `KraftViolation` for anything past 32. Kraft equality is now checked by folding the length histogram (exact at any depth), codes up to 32 bits keep the table path, and longer ones are decoded bit-serially from the histogram. `tests/long_codes.rs` hand-builds frames at every depth 1 … 254 from the spec text alone and cross-checks the black-box decoder (which reproduces them up to 32 bits and declines beyond).
+
 ### Added
 
 - `tests/blackbox_matrix.rs` — live interoperability matrix against the `ffmpeg` executable in both directions (skips when the tool is absent): 7 469 foreign cells (6 858 / 6 858 verifiable bit-exact, 611 without an oracle) and 9 565 own cells (all accepted warning-free, bit-exact), with a size comparison (+0.01 %).

@@ -73,6 +73,80 @@ pub struct HuffmanTable {
     /// case (`code_length[s] = 0`, all others 255). `slice_data` of
     /// length 0 then yields `n_pixels` copies of `sym`.
     pub single_symbol: Option<u8>,
+    /// Bit-serial decode structure, present iff some code is longer
+    /// than [`WIDE_CODE_BITS`] (`spec/05` §7.2 allows lengths up to
+    /// 254). Such a table keeps only its `<= WIDE_CODE_BITS` codes in
+    /// `entries` / `by_length` / `lut`.
+    serial: Option<SerialCode>,
+}
+
+/// Longest code length whose bit pattern is materialised as a `u32`.
+/// Longer codes (`spec/05` §7.2: any length in `1..=254` is legitimate
+/// on the wire) are decoded bit-serially from the length histogram.
+const WIDE_CODE_BITS: u8 = 32;
+
+/// Length-histogram form of a prefix code, for bit-serial decoding of
+/// codes of any length.
+///
+/// The `spec/05` §2.2 assignment (length DESC, symbol DESC, counting up
+/// from zero) is the bitwise complement of the code that sorts symbols
+/// by (length ASC, symbol ASC) and counts up from zero: complementing
+/// every bit mirrors the code tree, which turns "longest code leftmost"
+/// into "shortest code leftmost" and reverses the order inside each
+/// length tier. Decoding the complemented bit stream therefore needs
+/// only, per length, how many codes have that length, and the symbols
+/// listed in (length ASC, symbol ASC) order: after reading `len` bits,
+/// the value's offset past the first code of that length is either an
+/// index into this tier or carries (minus the tier's size, doubled)
+/// into the next. The offset never exceeds the symbol count for a
+/// complete code, so no wide arithmetic is involved.
+#[derive(Debug, Clone)]
+struct SerialCode {
+    /// `tier_size[len]` = number of symbols whose code is `len` bits.
+    tier_size: [u16; 256],
+    /// Symbols in (length ASC, symbol ASC) order.
+    symbols: Vec<u8>,
+    max_len: usize,
+}
+
+impl SerialCode {
+    fn new(items: &[(u8, u8)]) -> Self {
+        let mut tier_size = [0u16; 256];
+        for &(l, _) in items {
+            tier_size[l as usize] += 1;
+        }
+        let mut sorted: Vec<(u8, u8)> = items.to_vec();
+        sorted.sort_unstable();
+        SerialCode {
+            tier_size,
+            symbols: sorted.iter().map(|&(_, s)| s).collect(),
+            max_len: sorted.last().map_or(0, |&(l, _)| l as usize),
+        }
+    }
+
+    /// Decode one symbol at `br`'s cursor, advancing past its code.
+    /// `None` when the slice ends inside the code.
+    fn decode_one(&self, br: &mut BitReader<'_>) -> Option<u8> {
+        let mut offset = 0usize; // value minus the tier's first code
+        let mut first = 0usize; // index of the tier's first symbol
+        for len in 1..=self.max_len {
+            if !br.has_bits(1) {
+                return None;
+            }
+            // Complemented stream bit.
+            offset = (offset << 1) | (1 - br.peek_bits(1) as usize);
+            br.consume_bits(1);
+            let tier = self.tier_size[len] as usize;
+            if offset < tier {
+                return Some(self.symbols[first + offset]);
+            }
+            offset -= tier;
+            first += tier;
+        }
+        // Unreachable for a complete code (the last tier absorbs every
+        // remaining value); treated as end-of-data defensively.
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +185,7 @@ impl HuffmanTable {
                 max_len: 0,
                 lut: Vec::new(),
                 single_symbol: Some(single),
+                serial: None,
             });
         }
 
@@ -133,6 +208,7 @@ impl HuffmanTable {
                 max_len: 0,
                 lut: Vec::new(),
                 single_symbol: None,
+                serial: None,
             });
         }
 
@@ -148,17 +224,41 @@ impl HuffmanTable {
 
         let mut entries: [Option<CodeEntry>; 256] = [None; 256];
         let mut by_length = Vec::with_capacity(items.len());
-        let mut code: u32 = 0;
-        let mut prev_len = items[0].0;
-        let max_len = prev_len;
-        for (l, s) in items {
-            if l < prev_len {
-                code = (code + 1) >> (prev_len - l);
-                prev_len = l;
+        let max_len = items[0].0;
+        let serial = (max_len > WIDE_CODE_BITS).then(|| SerialCode::new(&items));
+        if serial.is_none() {
+            let mut code: u32 = 0;
+            let mut prev_len = max_len;
+            for (l, s) in items {
+                if l < prev_len {
+                    code = (code + 1) >> (prev_len - l);
+                    prev_len = l;
+                }
+                entries[s as usize] = Some(CodeEntry { code, length: l });
+                by_length.push((l, code, s));
+                code = code.wrapping_add(1);
             }
-            entries[s as usize] = Some(CodeEntry { code, length: l });
-            by_length.push((l, code, s));
-            code = code.wrapping_add(1);
+        } else {
+            // Some code is too long for a `u32`. Materialise the short
+            // ones through the complement identity (see `SerialCode`):
+            // walk (length ASC, symbol ASC), counting up from zero and
+            // doubling at each length step, and complement the result.
+            let mut value: u32 = 0;
+            let mut prev_len: u8 = 0;
+            for &(l, s) in items.iter().rev() {
+                if l > WIDE_CODE_BITS {
+                    break;
+                }
+                // `value < 2^prev_len` holds before the shift (complete
+                // prefix code), so the shifted value fits `l <= 32` bits.
+                value = ((u64::from(value)) << (l - prev_len)) as u32;
+                prev_len = l;
+                let mask = if l == 32 { u32::MAX } else { (1u32 << l) - 1 };
+                let code = !value & mask;
+                entries[s as usize] = Some(CodeEntry { code, length: l });
+                by_length.push((l, code, s));
+                value = value.wrapping_add(1);
+            }
         }
 
         // Stable-sort the reverse table by length ASC to make the
@@ -173,10 +273,13 @@ impl HuffmanTable {
             max_len,
             lut,
             single_symbol: None,
+            serial,
         })
     }
 
     /// Look up the bit pattern + length for symbol `s` if present.
+    /// `None` also for a symbol whose code is longer than 32 bits (such
+    /// tables are decode-only).
     pub fn code_for(&self, s: u8) -> Option<(u32, u8)> {
         self.entries[s as usize].map(|e| (e.code, e.length))
     }
@@ -247,6 +350,9 @@ impl HuffmanTable {
         if self.by_length.is_empty() {
             // No codebook + non-zero pixel count is malformed.
             return Err(Error::HuffmanDecodeFailure { bit_position: 0 });
+        }
+        if let Some(serial) = &self.serial {
+            return self.decode_slice_serial(serial, slice_data, n_pixels);
         }
         let mut br = BitReader::new(slice_data);
         let mut out = Vec::with_capacity(n_pixels);
@@ -445,6 +551,42 @@ impl HuffmanTable {
         Ok((out, br.position()))
     }
 
+    /// Slice decode for a table holding codes longer than
+    /// [`WIDE_CODE_BITS`]: one LUT probe per symbol, falling back to the
+    /// bit-serial walk for a miss or near the slice end.
+    fn decode_slice_serial(
+        &self,
+        serial: &SerialCode,
+        slice_data: &[u8],
+        n_pixels: usize,
+    ) -> Result<(Vec<u8>, usize)> {
+        let mut br = BitReader::new(slice_data);
+        let mut out = Vec::with_capacity(n_pixels);
+        let lut_bits = LUT_BITS as usize;
+        for px in 0..n_pixels {
+            if br.has_bits(lut_bits) {
+                let entry = self.lut[br.peek_bits(lut_bits) as usize];
+                if entry.len <= LUT_BITS {
+                    out.push(entry.sym);
+                    br.consume_bits(entry.len as usize);
+                    continue;
+                }
+            }
+            let bp_start = br.position();
+            match serial.decode_one(&mut br) {
+                Some(sym) => out.push(sym),
+                None => {
+                    return Err(Error::SliceTruncated {
+                        bit_position: bp_start,
+                        expected_pixels: n_pixels,
+                        decoded: px,
+                    });
+                }
+            }
+        }
+        Ok((out, br.position()))
+    }
+
     /// Maximum non-sentinel code length in this table. 0 for the
     /// single-symbol case.
     pub fn max_code_length(&self) -> u8 {
@@ -478,25 +620,28 @@ fn build_lut(by_length: &[RevEntry]) -> Vec<LutEntry> {
     lut
 }
 
+/// Kraft equality (`spec/02` §4) for code lengths anywhere in
+/// `1..=254`: fold the length histogram from the longest tier upwards.
+/// A complete code has an even number of nodes at every depth below the
+/// root (each pair merges into one node a level up) and exactly one
+/// node at depth 0. Counts stay below 512, so no wide arithmetic.
 fn kraft_check(items: &[(u8, u8)]) -> Result<()> {
-    // Compute Σ 2^(-l) using a numerator over 2^max_l. Equality must
-    // be exact.
-    let max_l = items.iter().map(|(l, _)| *l).max().unwrap();
-    if max_l == 0 || max_l > 32 {
-        // 0 is the single-symbol path (handled before this fn);
-        // > 32 is unreachable for a 256-symbol alphabet under
-        // canonical Huffman, but reject defensively.
-        return Err(Error::KraftViolation);
-    }
-    let scale: u64 = 1u64 << max_l;
-    let mut sum: u64 = 0;
-    for (l, _) in items {
-        if *l == 0 || *l > max_l {
+    let mut tier = [0u32; 256];
+    for &(l, _) in items {
+        if l == 0 || l == 255 {
             return Err(Error::KraftViolation);
         }
-        sum += scale >> *l;
+        tier[l as usize] += 1;
     }
-    if sum != scale {
+    let mut nodes = 0u32;
+    for len in (1..=254usize).rev() {
+        nodes += tier[len];
+        if !nodes.is_multiple_of(2) {
+            return Err(Error::KraftViolation);
+        }
+        nodes /= 2;
+    }
+    if nodes != 1 {
         return Err(Error::KraftViolation);
     }
     Ok(())

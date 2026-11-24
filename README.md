@@ -39,9 +39,10 @@ same option cells in the other direction.
 
 **Never verified against an outside stream:** gradient prediction in
 the decode direction (the black-box encoder does not offer it; the
-black-box decoder does accept this crate's gradient streams), slice
-counts above the smallest plane height, and anything outside the five
-FourCCs below.
+black-box decoder does accept this crate's gradient streams), code
+lengths above 16 bits (hand-built frames only; cross-checked against
+the black-box decoder up to 32), slice counts above the smallest plane
+height, and anything outside the five FourCCs below.
 
 The crate is codec-only: AVI / VfW container handling (including the
 FourCC + extradata that identifies a Ut Video stream on the wire) lives
@@ -98,14 +99,27 @@ build).
 multi-slice frames. If you relied on that, pass a budget explicitly or
 grant one through `set_execution_context`.
 
-### Not yet supported
+Code lengths over the whole wire range are decoded: the descriptor
+byte allows 1 … 254 bits (spec §05 §7.2), codes up to 32 bits go
+through a 12-bit table with a tier search behind it, longer ones
+through a bit-serial walk of the length histogram. Hand-built frames
+at every depth from 1 to 254 bits decode exactly
+(`tests/long_codes.rs`); the black-box decoder reproduces the same
+frames up to 32 bits and declines beyond. The encoder caps its own
+codes at 16 bits.
 
-- High-bit-depth FourCCs (`ULH0`, `ULH2`, 10-bit ULY4) — blocked on
-  out-of-corpus docs.
-- Ut Video Lite and interlaced variants — blocked on out-of-corpus
-  docs.
-- Raw / non-Huffman slice mode (`flags & 0x00000001 == 0`) — not
-  observed in the corpus.
+### Not supported
+
+Each of these is refused with a typed error; none is specified by the
+clean-room documents this crate is built from, and the black-box
+encoder emits none of them (probed: it maps every 10-bit / grey /
+packed input to one of the five 8-bit layouts above, and never sets
+the interlaced flag):
+
+- Interlaced streams (extradata flag `0x00000800`).
+- Raw / non-Huffman slices (extradata flag `0x00000001` clear).
+- Any other FourCC of the wider family (10-bit, alternate-matrix and
+  fast variants).
 
 ## Public API
 
